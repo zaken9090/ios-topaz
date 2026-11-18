@@ -1,0 +1,127 @@
+lavender-0990: Redmi Note 7 (SDM660) hardware on top of the topaz series
+
+- early screen console: ABL splash 0x9d400000, 1080x2340, stride 4320 (same 32 MB
+  block 0x9c000000 as topaz, so the block mappings stay; pointer and KVA alias +0x1400000)
+- sweetcpufreq defaults to 0 (SM6225 cpufreq-hw address)
+- AppleCLCD: no SM6225 MDP/DSI/INTF register access; frames are CPU-copied into the splash
+
+diff --git a/bsd/dev/sweet_cpufreq.c b/bsd/dev/sweet_cpufreq.c
+index 94c7552..1ffbddb 100644
+--- a/bsd/dev/sweet_cpufreq.c
++++ b/bsd/dev/sweet_cpufreq.c
+@@ -21,7 +21,7 @@ int sweet_cpufreq_max(void);
+ int
+ sweet_cpufreq_max(void)
+ {
+-	int on = 1;
++	int on = 0;     /* lavender: SM6225 cpufreq-hw address, nothing like it on SDM660 */
+ 	PE_parse_boot_argn("sweetcpufreq", &on, sizeof(on));
+ 	if (!on) {
+ 		return 0;
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+index 1d3ee17..3610f62 100644
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -352,11 +352,16 @@ AppleCLCD::start(IOService *provider)
+ 		IOLog("SWEET FB: no vsync timer\n");
+ 		return false;
+ 	}
+-	fVig0 = (volatile uint32_t *)ml_io_map(0x05e05000, 0x1000);
+-	fCtl0 = (volatile uint32_t *)ml_io_map(0x05e02000, 0x1000);
++	/*
++	 * lavender (SDM660): the SM6225 MDP/DSI blocks below do not exist here
++	 * (MDSS is at 0xc900000). No register access: frames are CPU-copied into
++	 * the ABL splash buffer (fVig0 == NULL path), the panel keeps scanning it.
++	 */
++	fVig0 = NULL;
++	fCtl0 = NULL;
+ 	topaz_adreno_init();
+ 	setProperty("RedwoodWaitsForGPU", true);         /* present() waits for the GPU (eagl.c reads it) */
+-	fDsi = (volatile uint8_t *)ml_io_map(0x05e94000, 0x1000);
++	fDsi = NULL;    /* lavender: no SM6225 DSI0 at 0x05e94000 */
+ 	fDsiBuf = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(kernel_task,
+ 	    kIODirectionInOut | kIOMemoryPhysicallyContiguous, page_size, 0x00000000fffff000ull);
+ 	fDsiBufPhys = fDsiBuf ? fDsiBuf->getPhysicalSegment(0, NULL, kIOMemoryMapperNone) : 0;
+@@ -399,7 +404,7 @@ AppleCLCD::start(IOService *provider)
+ 	}
+ 	OSSafeReleaseNULL(accel);
+ 	/* dpu sm6115 catalog: intf_1 at mdp+0x6a800, mdp at 0x5e01000 */
+-	fIntf1 = (volatile uint32_t *)ml_io_map(0x05e6b000, 0x1000);
++	fIntf1 = NULL;  /* lavender: no SM6225 INTF_1 at 0x05e6b000 */
+ 	if (fIntf1 != NULL) {
+ 		volatile uint32_t *r = fIntf1 + 0x800 / 4;
+ 		r[0x0a8 / 4] = 0x3;     /* FRAME_LINE_COUNT_EN */
+@@ -852,7 +857,7 @@ AppleCLCD::directEligible(const uint8_t *rec, SweetSurface **held)
+ 			layer = layer < 0 ? (int)i : -2;
+ 		}
+ 	}
+-	return layer >= 0 && held[layer] != NULL && held[layer]->gpuPool && !fPowerOff && !fConsShown;
++	return fCtl0 != NULL && layer >= 0 && held[layer] != NULL && held[layer]->gpuPool && !fPowerOff && !fConsShown;
+ }
+ 
+ void
+@@ -943,6 +948,9 @@ AppleCLCD::showPending(const uint8_t *rec, SweetSurface **heldIn)
+ void
+ AppleCLCD::scanFrom(uint64_t pa, uint32_t stride)
+ {
++	if (fVig0 == NULL || fCtl0 == NULL) {
++		return;         /* lavender: no MDP access yet */
++	}
+ 	fVig0[0x14 / 4] = (uint32_t)pa;
+ 	fVig0[0x24 / 4] = stride;
+ 	__asm__ volatile("dsb sy" ::: "memory");
+diff --git a/osfmk/arm64/arm_vm_init.c b/osfmk/arm64/arm_vm_init.c
+index b926886..1c72435 100644
+--- a/osfmk/arm64/arm_vm_init.c
++++ b/osfmk/arm64/arm_vm_init.c
+@@ -2235,7 +2235,8 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
+ 	}
+ #elif defined(SWEET)
+ 	/* The final TTBR1 is live; leave the outgoing VA=PA framebuffer alias. */
+-	sweet_early_relocate(SWEET_EARLY_FB_VA);
++	/* lavender: the splash is 0x1400000 into the 0x9c000000 block */
++	sweet_early_relocate(SWEET_EARLY_FB_VA + (0x9d400000 - 0x9c000000));
+ #endif
+ 	set_mmu_ttb(invalid_ttep & TTBR_BADDR_MASK);
+ 
+diff --git a/osfmk/arm64/start.s b/osfmk/arm64/start.s
+index 9fd1cb9..a8901e7 100644
+--- a/osfmk/arm64/start.s
++++ b/osfmk/arm64/start.s
+@@ -518,7 +518,7 @@ LEXT(start_first_cpu)
+ #if defined(TOPAZ_4K)
+ 	MOV64	x0, (0x5c000000 + 2368 * 4320)	/* topaz splash framebuffer */
+ #else
+-	MOV64	x0, (0x9c000000 + 2368 * 4320)
++	MOV64	x0, (0x9d400000 + 2308 * 4320)	/* lavender splash, bottom 32 rows */
+ #endif
+ 	mov		w1, #-1
+ 	mov		x2, #32
+@@ -712,7 +712,7 @@ Ltopaz_fb_block:
+ 	 * SWEET uses 16K pages and all bring-up RAM is below 4GB, so the first
+ 	 * V=P L2 page is bootstrap_pagetables + 2*PGBYTES.
+ 	 */
+-	MOV64	x10, 0x9c000000
++	MOV64	x10, 0x9c000000	/* lavender: 32MB block that holds the 0x9d400000 splash */
+ 	MOV64	x11, (ARM_TTE_TYPE_BLOCK | ARM_TTE_VALID | ARM_TTE_BLOCK_SH(SH_OUTER_MEMORY) | ARM_TTE_BLOCK_ATTRINDX(CACHE_ATTRINDX_WRITECOMB) | ARM_TTE_BLOCK_AF | ARM_TTE_BLOCK_PNX | ARM_TTE_BLOCK_NX)
+ 	orr		x11, x11, x10
+ 	and		x12, x10, #(ARM_TT_L2_INDEX_MASK)
+diff --git a/osfmk/arm64/sweet_early.c b/osfmk/arm64/sweet_early.c
+index 9429767..bf30c0f 100644
+--- a/osfmk/arm64/sweet_early.c
++++ b/osfmk/arm64/sweet_early.c
+@@ -14,11 +14,12 @@
+ #if defined(TOPAZ_4K)
+ static volatile uint32_t *early_fb = (volatile uint32_t *)(uintptr_t)0x5c000000;  /* topaz splash */
+ #else
+-static volatile uint32_t *early_fb = (volatile uint32_t *)(uintptr_t)0x9c000000;
++/* lavender (Redmi Note 7): ABL splash 0x9d400000, 1080x2340, stride 4320 */
++static volatile uint32_t *early_fb = (volatile uint32_t *)(uintptr_t)0x9d400000;
+ #endif
+ #define EARLY_FB early_fb
+ #define EARLY_WIDTH 1080u
+-#define EARLY_HEIGHT 2400u
++#define EARLY_HEIGHT 2340u
+ #define EARLY_STRIDE (4320u / 4)
+ #define EARLY_SCALE 2u
+ #define EARLY_CELL_W (8u * EARLY_SCALE)
