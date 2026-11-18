@@ -19,7 +19,9 @@
 ### M1. Ядро друкує текст на екрані — ✅ ДОСЯГНУТО 2026-11-19
 Ядро (topaz + `0990-lavender-hw`) проходить усю ініціалізацію і чекає кореневий диск (`Failed to write boot-picker-bringup-reason to NVRAM`, IOFindBSDRoot). Потрібен boot-arg `sweetbattery=0` (драйвер батареї topaz вішає шину SDM660). CI: macos-15-intel / Xcode 16.0.
 
-Далі: **M2 без IPSW** — у topaz є `mockfs` + `tools/sweet-init.S`/`mkinit.py`: крихітний init як RAM-диск (`rd=md0`), мета — рядок `SWEET userspace: init running as PID 1`.
+**M2 крок 1 ✅ 2026-11-19:** `*** SWEET userspace: init running as PID 1 ***` + `SWEET init: still alive` на телефоні (init з `tools/sweet-init.S`, зібраний на Windows: LLVM `--target=arm64-apple-ios16.0` + `tools/mkinit.py`, RAM-диск `rd=md0`).
+
+Було заплановано: **M2 без IPSW** — у topaz є `mockfs` + `tools/sweet-init.S`/`mkinit.py`: крихітний init як RAM-диск (`rd=md0`), мета — рядок `SWEET userspace: init running as PID 1`.
 
 Нижче — первинний план M1 (для історії).
 Потрібно:
