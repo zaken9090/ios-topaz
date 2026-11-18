@@ -8,3 +8,10 @@ shim/out/
 xnu/out/
 xnu/out-*/
 __pycache__/
+
+# lavender: device dumps, test images and blobs stay local
+lavender/shim/out/
+lavender/test/
+lavender/dump/
+*.img
+*.dtb
