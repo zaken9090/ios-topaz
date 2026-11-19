@@ -144,6 +144,28 @@ sd_wait(uint32_t want, uint32_t pmask, uint32_t pval, uint64_t deadline, uint32_
 	}
 }
 
+/* lavender bring-up: every standard SDHCI register once, after the first command */
+static void
+sd_dump_once(const char *why)
+{
+	static bool dumped;
+	if (dumped) {
+		return;
+	}
+	dumped = true;
+	printf("SWEET EMMC: regs after %s:
+", why);
+	for (uint32_t off = 0; off < 0x80; off += 0x20) {
+		printf("SWEET EMMC: %02x: %08x %08x %08x %08x %08x %08x %08x %08x
+", off,
+		    ufs_rd(off), ufs_rd(off + 4), ufs_rd(off + 8), ufs_rd(off + 12),
+		    ufs_rd(off + 16), ufs_rd(off + 20), ufs_rd(off + 24), ufs_rd(off + 28));
+	}
+	printf("SWEET EMMC: int status as 16-bit: normal %04x error %04x
+",
+	    *(volatile uint16_t *)(su.regs + SD_INT_STATUS), *(volatile uint16_t *)(su.regs + SD_INT_STATUS + 2));
+}
+
 static void
 sd_reset_lines(void)
 {
@@ -185,7 +207,28 @@ sd_cmd(uint32_t idx, uint32_t arg, uint32_t flags, uint32_t blocks, bool write)
 	/* transfer mode and command in one 32-bit write: the command write starts it */
 	ufs_wr(SD_CMD, (idx << 8 | flags) << 16 | mode);
 
-	error = sd_wait(INT_CMD_DONE, PRES_CMD_INHIBIT, 0, deadline, &s);
+	/*
+	 * lavender (phone test 2): CMD inhibit stayed set and no status bit came
+	 * although the data was already in the buffer. Treat buffer read enable as
+	 * the response having arrived too.
+	 */
+	for (;;) {
+		uint32_t pres = ufs_rd(SD_PRESENT);
+		s = ufs_rd(SD_INT_STATUS);
+		if (s & (INT_ERROR | INT_ERRORS)) {
+			error = EIO;
+			break;
+		}
+		if ((s & INT_CMD_DONE) || !(pres & PRES_CMD_INHIBIT) ||
+		    (blocks && !write && (pres & PRES_BUF_RD))) {
+			break;
+		}
+		if (mach_absolute_time() > deadline) {
+			error = ETIMEDOUT;
+			break;
+		}
+		delay(1);
+	}
 	if (!error) {
 		ufs_wr(SD_INT_STATUS, INT_CMD_DONE);
 		uint32_t r1 = ufs_rd(SD_RESP0);
@@ -215,6 +258,21 @@ sd_cmd(uint32_t idx, uint32_t arg, uint32_t flags, uint32_t blocks, bool write)
 	}
 	if (!error && (blocks || flags == CF_R1B)) {
 		error = sd_wait(INT_XFER_DONE, PRES_DAT_INHIBIT, 0, deadline, &s);
+	}
+	sd_dump_once(error ? "a failed command" : "the first command");
+	if (!error && (ufs_rd(SD_PRESENT) & PRES_CMD_INHIBIT)) {
+		/* the controller never closed the command: reset the CMD line only */
+		static unsigned stuck;
+		if (stuck++ < 3) {
+			printf("SWEET EMMC: CMD%u done but CMD inhibit stuck (present 0x%x): CMD line reset
+",
+			    idx, ufs_rd(SD_PRESENT));
+		}
+		ufs_wr(SD_CLOCK, ufs_rd(SD_CLOCK) | RST_CMD);
+		uint64_t d2 = sd_deadline();
+		while ((ufs_rd(SD_CLOCK) & RST_CMD) && mach_absolute_time() < d2) {
+			delay(1);
+		}
 	}
 	ufs_wr(SD_INT_STATUS, 0xffffffffu);
 	if (error) {
