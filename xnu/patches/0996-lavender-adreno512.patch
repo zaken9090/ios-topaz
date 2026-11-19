@@ -7,7 +7,7 @@ ME_INIT and SET_SECURE_MODE 0. RedwoodGPU reports chip 5.1.2.0, GMEM 272 KB.
 GPU pool 0xa4000000 (384 MB). Boot-arg gpu=1 (gpu_mhz=19/300/600).
 
 diff --git a/iokit/Kernel/arm/TopazAdreno.cpp b/iokit/Kernel/arm/TopazAdreno.cpp
-index 16da336..8aafd83 100644
+index 16da336..f7b3186 100644
 --- a/iokit/Kernel/arm/TopazAdreno.cpp
 +++ b/iokit/Kernel/arm/TopazAdreno.cpp
 @@ -55,16 +55,23 @@ void redwood_tl(const char *format, ...) __printflike(1, 2);
@@ -580,16 +580,19 @@ index 16da336..8aafd83 100644
  		IOLog("TopazGPU: map failed\n");
  		return false;
  	}
-@@ -1017,7 +1121,7 @@ hw_start(void)
+@@ -1017,8 +1121,9 @@ hw_start(void)
  	if (!power_up()) {
  		return false;
  	}
 -	IOLog("TopazGPU: powered: RBBM_STATUS %08x\n", gpu_rd(0x210));
+-	return zap_load() && smmu_setup() && cp_start();
 +	IOLog("TopazGPU: powered: RBBM_STATUS %08x SECVID_TRUST %08x\n", gpu_rd(0x4f5), gpu_rd(0xf400));
- 	return zap_load() && smmu_setup() && cp_start();
++	/* lavender: the SMMU before the zap shader; after it, global SMMU accesses hang (shim probes v3/v4) */
++	return smmu_setup() && zap_load() && cp_start();
  }
  
-@@ -1033,20 +1137,20 @@ bool
+ /* ---------------------------------------------------------------- the interface RedwoodGPU.cpp uses */
+@@ -1033,20 +1138,20 @@ bool
  redwood_gpu_parameter(uint32_t which, uint64_t *value)
  {
  	switch (which) {
@@ -615,7 +618,7 @@ index 16da336..8aafd83 100644
  	case 0x13: *value = 0; return true;                     /* MACROTILE_MODE */
  	default:
  		return false;                                   /* VA_START/VA_SIZE: addresses are ours to give */
-@@ -1160,19 +1264,16 @@ redwood_gpu_submit(const uint64_t *addresses, const uint32_t *words, uint32_t co
+@@ -1160,19 +1265,16 @@ redwood_gpu_submit(const uint64_t *addresses, const uint32_t *words, uint32_t co
  void
  redwood_gpu_report(const char *why)
  {
@@ -638,7 +641,7 @@ index 16da336..8aafd83 100644
  	ready = false;
  }
  
-@@ -1198,6 +1299,17 @@ topaz_adreno_thread(__unused void *param, __unused wait_result_t wr_)
+@@ -1198,6 +1300,17 @@ topaz_adreno_thread(__unused void *param, __unused wait_result_t wr_)
  	IOLockLock(hw_lock);
  	bool ok = hw_start();
  	IOLockUnlock(hw_lock);
@@ -656,7 +659,7 @@ index 16da336..8aafd83 100644
  	if (!ok) {
  		failed = true;
  		IOLog("TopazGPU: THE GPU IS NOT STARTED\n");
-@@ -1205,7 +1317,7 @@ topaz_adreno_thread(__unused void *param, __unused wait_result_t wr_)
+@@ -1205,7 +1318,7 @@ topaz_adreno_thread(__unused void *param, __unused wait_result_t wr_)
  	}
  	ready = true;
  	RedwoodGPUStart();
