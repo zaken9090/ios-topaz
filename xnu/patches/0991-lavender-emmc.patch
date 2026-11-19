@@ -5,7 +5,7 @@ CI run 44412839094). Only the hardware layer changes; read-only unless ufsrw=1.
 The topaz touch/keys drivers now need sweethw=1 (SM6225 MMIO).
 
 diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
-index 143db60..efad4b2 100644
+index 143db60..1e0398f 100644
 --- a/bsd/dev/sweet_ufs.c
 +++ b/bsd/dev/sweet_ufs.c
 @@ -1,4 +1,14 @@
@@ -23,7 +23,7 @@ index 143db60..efad4b2 100644
   * SWEET internal UFS root device.
   *
   * The Qualcomm UFS host (UFSHCI 2.1) is left enabled with the link up by the
-@@ -54,54 +64,60 @@ extern void sweet_keys_init(void);
+@@ -54,54 +64,71 @@ extern void sweet_keys_init(void);
  extern void sweet_touch_init(void);
  extern void sweet_usb_probe(void);
  
@@ -43,6 +43,9 @@ index 143db60..efad4b2 100644
 -#define CAP_64AS        (1u << 24)              /* 64-bit DMA addressing */
 -
 -#define UFS_BLOCK       4096u
+-#define BOUNCE_SIZE     (1u << 20)
+-#define PRDT_CHUNK      (256u << 10)            /* PRDT byte count field: 18 bits */
+-#define PRDT_MAX        (BOUNCE_SIZE / PRDT_CHUNK)
 +#define SD_BLKSIZE      0x04            /* [15:0] block size, [31:16] block count */
 +#define SD_ARG          0x08
 +#define SD_CMD          0x0c            /* [15:0] transfer mode, [31:16] command */
@@ -53,6 +56,9 @@ index 143db60..efad4b2 100644
 +#define SD_INT_STATUS   0x30            /* [15:0] normal, [31:16] error */
 +#define SD_INT_ENABLE   0x34
 +#define SD_INT_SIGNAL   0x38
++#define SD_HOST_CTRL    0x28            /* 8-bit: [4:3] DMA select, 11 = 64-bit ADMA2 */
++#define SD_ADMA_LO      0x58
++#define SD_ADMA_HI      0x5c
 +#define SD_CAP          0x40
 +#define CQ_CFG          0x08            /* cmdq_mem: CQE enable is bit 0 */
 +
@@ -67,11 +73,13 @@ index 143db60..efad4b2 100644
 +#define INT_XFER_DONE           (1u << 1)
 +#define INT_BUF_WR              (1u << 4)
 +#define INT_BUF_RD              (1u << 5)
++#define INT_ADMA_ERR            (1u << 25)
 +#define INT_ERROR               (1u << 15)
 +#define INT_ERRORS              0xffff0000u
 +#define INT_ENABLE_ALL          0x03ff003fu     /* normal 0-5, errors 16-25 */
 +
 +/* transfer mode */
++#define TM_DMA          (1u << 0)
 +#define TM_BLKCNT       (1u << 1)
 +#define TM_ACMD12       (1u << 2)
 +#define TM_READ         (1u << 4)
@@ -84,9 +92,11 @@ index 143db60..efad4b2 100644
 +#define R1_ERRORS       0xe4300000u
 +
 +#define UFS_BLOCK       512u            /* lavender: eMMC sector = GPT LBA */
- #define BOUNCE_SIZE     (1u << 20)
--#define PRDT_CHUNK      (256u << 10)            /* PRDT byte count field: 18 bits */
--#define PRDT_MAX        (BOUNCE_SIZE / PRDT_CHUNK)
++/*
++ * lavender: one ADMA2 descriptor per command, so its 12- or 16-byte size in
++ * 64-bit mode does not matter; 32 KiB fits its 16-bit length field.
++ */
++#define BOUNCE_SIZE     (32u << 10)
  #define CMD_TIMEOUT_NS  (5ull * NSEC_PER_SEC)
 -#define CMD_SPIN_NS     (50ull * NSEC_PER_USEC)
 -#define CMD_SLEEP_NS    (200ull * NSEC_PER_USEC)
@@ -105,15 +115,16 @@ index 143db60..efad4b2 100644
 -		uint32_t addr_lo, addr_hi, rsvd, dbc;
 -	} prdt[PRDT_MAX];
 -};
++#define ADMA_TRAN_END   0x23            /* valid | end | act = transfer */
  
 -/* Layout of the contiguous DMA allocation. */
 -#define DMA_UTRL        0x0000                  /* 1 KiB aligned */
 -#define DMA_UCD         0x1000                  /* 128 byte aligned */
 -#define DMA_BOUNCE      0x4000
--#define DMA_SIZE        (DMA_BOUNCE + BOUNCE_SIZE)
-+/* Layout of the contiguous allocation: only the bounce buffer (PIO, no DMA). */
-+#define DMA_BOUNCE      0x0000
-+#define DMA_SIZE        BOUNCE_SIZE
++/* Layout of the contiguous DMA allocation (may be above 4 GiB: 64-bit ADMA2). */
++#define DMA_DESC        0x0000
++#define DMA_BOUNCE      0x1000
+ #define DMA_SIZE        (DMA_BOUNCE + BOUNCE_SIZE)
  
  static struct {
  	vm_offset_t regs;
@@ -124,7 +135,7 @@ index 143db60..efad4b2 100644
  	uint8_t lun;
  	uint8_t tag;
  	uint64_t first_block, nblocks;          /* partition, in 4 KiB device blocks */
-@@ -129,146 +145,246 @@ ufs_wr(uint32_t off, uint32_t v)
+@@ -129,146 +156,255 @@ ufs_wr(uint32_t off, uint32_t v)
  	*(volatile uint32_t *)(su.regs + off) = v;
  }
  
@@ -135,95 +146,32 @@ index 143db60..efad4b2 100644
 +	*(volatile uint16_t *)(su.regs + off) = v;
 +}
 +
+ static void
+-dma_sync(uint32_t off, uint32_t len)
++dma_flush(uint32_t off, uint32_t len)
+ {
+ 	flush_dcache64((addr64_t)(su.dma_pa + off), len, TRUE);
+ }
+ 
+-static void
+-dma_clean(uint32_t off, uint32_t len)
 +static uint64_t
 +sd_deadline(void)
-+{
+ {
+-	clean_dcache64((addr64_t)(su.dma_pa + off), len, TRUE);
 +	uint64_t d;
 +	nanoseconds_to_absolutetime(CMD_TIMEOUT_NS, &d);
 +	return d + mach_absolute_time();
-+}
-+
-+/*
-+ * Wait for any of the interrupt status bits in want, or for the present state
-+ * bits in pmask to read as pval. lavender (2026-11-19, first phone test): the
-+ * interrupt status stayed 0 while the present state showed the data in the
-+ * buffer, so the present state is what the driver relies on; error status bits
-+ * still fail the command. 0, EIO on an error status, or ETIMEDOUT.
-+ */
-+static int
-+sd_wait(uint32_t want, uint32_t pmask, uint32_t pval, uint64_t deadline, uint32_t *status)
-+{
-+	for (;;) {
-+		uint32_t s = ufs_rd(SD_INT_STATUS);
-+		if (s & (INT_ERROR | INT_ERRORS)) {
-+			*status = s;
-+			return EIO;
-+		}
-+		if ((s & want) || (pmask && (ufs_rd(SD_PRESENT) & pmask) == pval)) {
-+			*status = s;
-+			return 0;
-+		}
-+		if (mach_absolute_time() > deadline) {
-+			*status = s;
-+			return ETIMEDOUT;
-+		}
-+		delay(1);
-+	}
-+}
-+
-+/* lavender bring-up: register reads for the photo; never the buffer port (it pops data) */
-+static uint32_t
-+sd_peek(uint32_t off)
-+{
-+	return off == SD_BUFFER ? 0xbbbbbbbbu : ufs_rd(off);
-+}
-+
-+/* the first two commands: every standard SDHCI register, the msm vendor block once */
- static void
--dma_sync(uint32_t off, uint32_t len)
-+sd_dump_once(const char *why)
- {
--	flush_dcache64((addr64_t)(su.dma_pa + off), len, TRUE);
-+	static unsigned dumped;
-+	if (dumped >= 2) {
-+		return;
-+	}
-+	dumped++;
-+	printf("SWEET EMMC: regs after %s:\n", why);
-+	for (uint32_t off = 0; off < 0x80; off += 0x20) {
-+		printf("SWEET EMMC: %02x: %08x %08x %08x %08x %08x %08x %08x %08x\n", off,
-+		    sd_peek(off), sd_peek(off + 4), sd_peek(off + 8), sd_peek(off + 12),
-+		    sd_peek(off + 16), sd_peek(off + 20), sd_peek(off + 24), sd_peek(off + 28));
-+	}
-+	if (dumped == 1) {
-+		for (uint32_t off = 0x100; off < 0x140; off += 0x20) {
-+			printf("SWEET EMMC: %03x: %08x %08x %08x %08x %08x %08x %08x %08x\n", off,
-+			    ufs_rd(off), ufs_rd(off + 4), ufs_rd(off + 8), ufs_rd(off + 12),
-+			    ufs_rd(off + 16), ufs_rd(off + 20), ufs_rd(off + 24), ufs_rd(off + 28));
-+		}
-+	}
-+	printf("SWEET EMMC: int status as 16-bit: normal %04x error %04x\n",
-+	    *(volatile uint16_t *)(su.regs + SD_INT_STATUS), *(volatile uint16_t *)(su.regs + SD_INT_STATUS + 2));
- }
- 
- static void
--dma_clean(uint32_t off, uint32_t len)
-+sd_reset_lines(void)
- {
--	clean_dcache64((addr64_t)(su.dma_pa + off), len, TRUE);
-+	ufs_wr(SD_CLOCK, ufs_rd(SD_CLOCK) | RST_CMD | RST_DAT);
-+	uint64_t deadline = sd_deadline();
-+	while ((ufs_rd(SD_CLOCK) & (RST_CMD | RST_DAT)) && mach_absolute_time() < deadline) {
-+		delay(1);
-+	}
-+	ufs_wr(SD_INT_STATUS, 0xffffffffu);
  }
  
  /*
 - * One SCSI command in slot 0, data (if any) to/from the bounce buffer
 - * (to the device when write is set). Returns 0 or an errno.
-+ * One command. With blocks != 0, data moves between the bounce buffer and the
-+ * card by PIO (to the card when write). R1 status is checked. 0 or an errno.
++ * Wait for any of the interrupt status bits in want, or for the present state
++ * bits in pmask to read as pval. lavender (2026-11-19, first phone test): the
++ * interrupt status stayed 0 while the present state showed the data in the
++ * buffer, so the present state is what the driver relies on; error status bits
++ * still fail the command. 0, EIO on an error status, or ETIMEDOUT.
   */
  static int
 -ufs_scsi(const uint8_t *cdb, unsigned cdb_len, uint32_t len, bool write)
@@ -270,21 +218,25 @@ index 143db60..efad4b2 100644
 -		if (len) {
 -			dma_clean(DMA_UCD + offsetof(struct ucd, prdt),
 -			    (utrd->prdt & 0xffff) * sizeof(ucd->prdt[0]));
-+sd_cmd(uint32_t idx, uint32_t arg, uint32_t flags, uint32_t blocks, bool write)
++sd_wait(uint32_t want, uint32_t pmask, uint32_t pval, uint64_t deadline, uint32_t *status)
 +{
-+	uint64_t deadline = sd_deadline();
-+	uint32_t s = 0;
-+	int error = 0;
-+
-+	while (ufs_rd(SD_PRESENT) & (PRES_CMD_INHIBIT | (blocks || flags == CF_R1B ? PRES_DAT_INHIBIT : 0))) {
-+		if (mach_absolute_time() > deadline) {
-+			printf("SWEET EMMC: CMD%u: lines busy (present 0x%x)\n", idx, ufs_rd(SD_PRESENT));
-+			sd_reset_lines();
-+			return ETIMEDOUT;
++	for (;;) {
++		uint32_t s = ufs_rd(SD_INT_STATUS);
++		if (s & (INT_ERROR | INT_ERRORS)) {
++			*status = s;
++			return EIO;
  		}
 -	} else {
 -		dma_sync(DMA_UTRL, sizeof(*utrd));
 -		dma_sync(DMA_UCD, sizeof(*ucd));
++		if ((s & want) || (pmask && (ufs_rd(SD_PRESENT) & pmask) == pval)) {
++			*status = s;
++			return 0;
++		}
++		if (mach_absolute_time() > deadline) {
++			*status = s;
++			return ETIMEDOUT;
++		}
 +		delay(1);
  	}
 -	if (len) {
@@ -313,12 +265,101 @@ index 143db60..efad4b2 100644
 -		if (now > deadline) {
 -			ufs_wr(REG_UTRLCLR, ~1u);
 -			printf("SWEET UFS: command 0x%02x timed out\n", cdb[0]);
--			return ETIMEDOUT;
++}
++
++/* lavender bring-up: register reads for the photo; never the buffer port (it pops data) */
++static uint32_t
++sd_peek(uint32_t off)
++{
++	return off == SD_BUFFER ? 0xbbbbbbbbu : ufs_rd(off);
++}
++
++/* the first two commands: every standard SDHCI register, the msm vendor block once */
++static void
++sd_dump_once(const char *why)
++{
++	static unsigned dumped;
++	if (dumped >= 2) {
++		return;
++	}
++	dumped++;
++	printf("SWEET EMMC: regs after %s:\n", why);
++	for (uint32_t off = 0; off < 0x80; off += 0x20) {
++		printf("SWEET EMMC: %02x: %08x %08x %08x %08x %08x %08x %08x %08x\n", off,
++		    sd_peek(off), sd_peek(off + 4), sd_peek(off + 8), sd_peek(off + 12),
++		    sd_peek(off + 16), sd_peek(off + 20), sd_peek(off + 24), sd_peek(off + 28));
++	}
++	if (dumped == 1) {
++		for (uint32_t off = 0x100; off < 0x140; off += 0x20) {
++			printf("SWEET EMMC: %03x: %08x %08x %08x %08x %08x %08x %08x %08x\n", off,
++			    ufs_rd(off), ufs_rd(off + 4), ufs_rd(off + 8), ufs_rd(off + 12),
++			    ufs_rd(off + 16), ufs_rd(off + 20), ufs_rd(off + 24), ufs_rd(off + 28));
++		}
++	}
++	printf("SWEET EMMC: int status as 16-bit: normal %04x error %04x\n",
++	    *(volatile uint16_t *)(su.regs + SD_INT_STATUS), *(volatile uint16_t *)(su.regs + SD_INT_STATUS + 2));
++}
++
++static void
++sd_reset_lines(void)
++{
++	ufs_wr(SD_CLOCK, ufs_rd(SD_CLOCK) | RST_CMD | RST_DAT);
++	uint64_t deadline = sd_deadline();
++	while ((ufs_rd(SD_CLOCK) & (RST_CMD | RST_DAT)) && mach_absolute_time() < deadline) {
++		delay(1);
++	}
++	ufs_wr(SD_INT_STATUS, 0xffffffffu);
++}
++
++/*
++ * One command. With blocks != 0, data moves between the bounce buffer and the
++ * card by PIO (to the card when write). R1 status is checked. 0 or an errno.
++ */
++static int
++sd_cmd(uint32_t idx, uint32_t arg, uint32_t flags, uint32_t blocks, bool write)
++{
++	uint64_t deadline = sd_deadline();
++	uint32_t s = 0;
++	int error = 0;
++
++	while (ufs_rd(SD_PRESENT) & (PRES_CMD_INHIBIT | (blocks || flags == CF_R1B ? PRES_DAT_INHIBIT : 0))) {
++		if (mach_absolute_time() > deadline) {
++			printf("SWEET EMMC: CMD%u: lines busy (present 0x%x)\n", idx, ufs_rd(SD_PRESENT));
++			sd_reset_lines();
+ 			return ETIMEDOUT;
+ 		}
+-		if (sleepable && now >= spin_until) {
+-			uint64_t wake = now + MIN(sleep_interval, deadline - now);
+-			/* Keep the mutex: slot 0 and the bounce buffer are still owned. */
+-			if (assert_wait_deadline_with_leeway((event_t)&su.wait, THREAD_UNINT,
+-			    TIMEOUT_URGENCY_SYS_CRITICAL, wake, 0) == THREAD_WAITING) {
+-				thread_block(THREAD_CONTINUE_NULL);
++		delay(1);
++	}
 +	ufs_wr(SD_INT_STATUS, 0xffffffffu);
 +	uint32_t mode = 0;
 +	if (blocks) {
++		/*
++		 * lavender phone test 5: PIO reads through the buffer port never drained
++		 * the FIFO on this msm host (Linux, LK and ABL only ever use ADMA2), so
++		 * data moves by one 64-bit ADMA2 descriptor into the bounce buffer.
++		 */
++		uint32_t len = blocks * UFS_BLOCK;
++		uint64_t buf_pa = su.dma_pa + DMA_BOUNCE, desc_pa = su.dma_pa + DMA_DESC;
++		volatile uint32_t *d = (volatile uint32_t *)(su.dma + DMA_DESC);
++		d[0] = (len << 16) | ADMA_TRAN_END;
++		d[1] = (uint32_t)buf_pa;
++		d[2] = (uint32_t)(buf_pa >> 32);
++		d[3] = 0;
++		dma_flush(DMA_DESC, 64);
++		dma_flush(DMA_BOUNCE, len);
++		__builtin_arm_dsb(0xf);
++		uint8_t hc = *(volatile uint8_t *)(su.regs + SD_HOST_CTRL);
++		*(volatile uint8_t *)(su.regs + SD_HOST_CTRL) = (uint8_t)((hc & ~0x18u) | 0x18u);
++		ufs_wr(SD_ADMA_LO, (uint32_t)desc_pa);
++		ufs_wr(SD_ADMA_HI, (uint32_t)(desc_pa >> 32));
 +		flags |= CF_DATA;
-+		mode = TM_BLKCNT | (write ? 0 : TM_READ) | (blocks > 1 ? TM_MULTI | TM_ACMD12 : 0);
++		mode = TM_DMA | TM_BLKCNT | (write ? 0 : TM_READ) | (blocks > 1 ? TM_MULTI | TM_ACMD12 : 0);
 +		ufs_wr16(SD_BLKSIZE, UFS_BLOCK);
 +		ufs_wr16(SD_BLKSIZE + 2, (uint16_t)blocks);
 +	}
@@ -351,14 +392,10 @@ index 143db60..efad4b2 100644
 +				n++;
 +				lp = pp;
 +				ls = ss;
-+			}
+ 			}
+-		} else {
+-			delay(1);
  		}
--		if (sleepable && now >= spin_until) {
--			uint64_t wake = now + MIN(sleep_interval, deadline - now);
--			/* Keep the mutex: slot 0 and the bounce buffer are still owned. */
--			if (assert_wait_deadline_with_leeway((event_t)&su.wait, THREAD_UNINT,
--			    TIMEOUT_URGENCY_SYS_CRITICAL, wake, 0) == THREAD_WAITING) {
--				thread_block(THREAD_CONTINUE_NULL);
 +		printf("SWEET EMMC: CMD%u trace (us present status):\n", idx);
 +		for (uint32_t i = 0; i < n; i += 2) {
 +			if (i + 1 < n) {
@@ -366,10 +403,8 @@ index 143db60..efad4b2 100644
 +				    tus[i], tp[i], ts[i], tus[i + 1], tp[i + 1], ts[i + 1]);
 +			} else {
 +				printf("SWEET EMMC:  %u %08x %08x\n", tus[i], tp[i], ts[i]);
- 			}
--		} else {
--			delay(1);
- 		}
++			}
++		}
 +		printf("SWEET EMMC: CMD%u resp %08x\n", idx, ufs_rd(SD_RESP0));
  	}
 -	__builtin_arm_dsb(0xf);
@@ -401,9 +436,7 @@ index 143db60..efad4b2 100644
 +			break;
 +		}
 +		delay(1);
- 	}
--	if (len && !(su.cache && write)) {
--		dma_sync(DMA_BOUNCE, len);
++	}
 +	if (!error) {
 +		ufs_wr(SD_INT_STATUS, INT_CMD_DONE);
 +		uint32_t r1 = ufs_rd(SD_RESP0);
@@ -412,35 +445,21 @@ index 143db60..efad4b2 100644
 +			error = EIO;
 +		}
  	}
+-	if (len && !(su.cache && write)) {
+-		dma_sync(DMA_BOUNCE, len);
++	if (!error && (blocks || (flags & 0x1f) == CF_R1B)) {
++		error = sd_wait(INT_XFER_DONE, PRES_DAT_INHIBIT, 0, deadline, &s);
+ 	}
 -
 -	uint32_t ocs = utrd->dw2 & 0xff;
 -	if (ocs || ucd->resp[0] != 0x21 || ucd->resp[6] || ucd->resp[7]) {
 -		printf("SWEET UFS: command 0x%02x failed: ocs 0x%x upiu 0x%x response 0x%x status 0x%x\n",
 -		    cdb[0], ocs, ucd->resp[0], ucd->resp[6], ucd->resp[7]);
 -		return EIO;
-+	uint32_t *buf = (uint32_t *)(su.dma + DMA_BOUNCE);
-+	for (uint32_t b = 0; !error && b < blocks; b++) {
-+		error = sd_wait(write ? INT_BUF_WR : INT_BUF_RD, write ? PRES_BUF_WR : PRES_BUF_RD,
-+		    write ? PRES_BUF_WR : PRES_BUF_RD, deadline, &s);
-+		if (error) {
-+			break;
-+		}
-+		ufs_wr(SD_INT_STATUS, write ? INT_BUF_WR : INT_BUF_RD);
-+		uint32_t *p = buf + b * (UFS_BLOCK / 4);
-+		if (write) {
-+			for (unsigned i = 0; i < UFS_BLOCK / 4; i++) {
-+				ufs_wr(SD_BUFFER, p[i]);
-+			}
-+		} else {
-+			for (unsigned i = 0; i < UFS_BLOCK / 4; i++) {
-+				p[i] = ufs_rd(SD_BUFFER);
-+			}
-+		}
++	if (blocks) {
++		dma_flush(DMA_BOUNCE, blocks * UFS_BLOCK);      /* drop stale lines before the CPU reads */
  	}
 -	return 0;
-+	if (!error && (blocks || flags == CF_R1B)) {
-+		error = sd_wait(INT_XFER_DONE, PRES_DAT_INHIBIT, 0, deadline, &s);
-+	}
 +	sd_dump_once(error ? "a failed command" : "the first command");
 +	if (!error && (ufs_rd(SD_PRESENT) & PRES_CMD_INHIBIT)) {
 +		/* the controller never closed the command: reset the CMD line only */
@@ -483,7 +502,7 @@ index 143db60..efad4b2 100644
  }
  
  /*
-@@ -294,19 +410,18 @@ ufs_write_blocks(uint64_t lba, uint32_t count)
+@@ -294,19 +430,18 @@ ufs_write_blocks(uint64_t lba, uint32_t count)
  		printf("SWEET UFS: refusing write of %u blocks at 0x%llx\n", count, lba);
  		return EPERM;
  	}
@@ -510,7 +529,7 @@ index 143db60..efad4b2 100644
  }
  
  static int
-@@ -475,34 +590,50 @@ sweet_ufs_read_part(const char *want, uint64_t off, void *dst, uint64_t len)
+@@ -475,34 +610,46 @@ sweet_ufs_read_part(const char *want, uint64_t off, void *dst, uint64_t len)
  static int
  ufs_take_over_host(void)
  {
@@ -522,16 +541,16 @@ index 143db60..efad4b2 100644
 +	    ufs_rd(SD_CAP), pres, clk, ufs_rd(SD_INT_ENABLE));
 +	if (!(clk & CLK_SD_EN)) {
 +		printf("SWEET EMMC: card clock is off: ABL left no usable host\n");
++		return ENXIO;
++	}
++	if (su.cq && (*(volatile uint32_t *)(su.cq + CQ_CFG) & 1)) {
++		printf("SWEET EMMC: command queue engine enabled (CQCFG 0x%x): not supported\n",
++		    *(volatile uint32_t *)(su.cq + CQ_CFG));
  		return ENXIO;
  	}
 -	if (ufs_rd(REG_UTRLDBR)) {
 -		printf("SWEET UFS: requests outstanding from the bootloader\n");
 -		return EBUSY;
-+	if (su.cq && (*(volatile uint32_t *)(su.cq + CQ_CFG) & 1)) {
-+		printf("SWEET EMMC: command queue engine enabled (CQCFG 0x%x): not supported\n",
-+		    *(volatile uint32_t *)(su.cq + CQ_CFG));
-+		return ENXIO;
-+	}
 +	ufs_wr(SD_INT_SIGNAL, 0);               /* polled operation */
 +	ufs_wr(SD_INT_ENABLE, INT_ENABLE_ALL);
 +	if (pres & (PRES_CMD_INHIBIT | PRES_DAT_INHIBIT)) {
@@ -544,10 +563,6 @@ index 143db60..efad4b2 100644
 +	ufs_wr(SD_INT_STATUS, 0xffffffffu);
 +	printf("SWEET EMMC: int enable now 0x%x, int status 0x%x\n",
 +	    ufs_rd(SD_INT_ENABLE), ufs_rd(SD_INT_STATUS));
-+
-+	/* CMD13 SEND_STATUS (RCA 1 as Linux/UEFI assign it): a command without data first */
-+	int st = sd_cmd(13, 1u << 16, CF_R1, 0, false);
-+	printf("SWEET EMMC: CMD13 -> %d, card status 0x%x\n", st, ufs_rd(SD_RESP0));
 +
 +	/* CMD8 SEND_EXT_CSD: proves the card answers, and which area is selected. */
 +	int error = sd_cmd(8, 0, CF_R1, 1, false);
@@ -583,7 +598,7 @@ index 143db60..efad4b2 100644
  	return 0;
  }
  
-@@ -761,6 +892,8 @@ sweet_ufs_init(void)
+@@ -761,6 +908,8 @@ sweet_ufs_init(void)
  	su.wait = (wait == 1);
  
  	su.regs = ml_io_map(reg[0], reg[1]);
@@ -592,7 +607,7 @@ index 143db60..efad4b2 100644
  	if (kmem_alloc_contig(kernel_map, &su.dma, DMA_SIZE, PAGE_MASK, 0, 0,
  	    KMA_DATA | KMA_ZERO | KMA_PERMANENT, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
  		printf("SWEET UFS: no contiguous DMA memory\n");
-@@ -776,12 +909,6 @@ sweet_ufs_init(void)
+@@ -776,12 +925,6 @@ sweet_ufs_init(void)
  
  	lck_mtx_lock(&sweet_ufs_lock);
  	error = ufs_take_over_host();
@@ -605,7 +620,7 @@ index 143db60..efad4b2 100644
  	if (!error) {
  		error = ufs_find_partition(want);
  	}
-@@ -804,7 +931,7 @@ sweet_ufs_init(void)
+@@ -804,7 +947,7 @@ sweet_ufs_init(void)
  	/* Only now, with the partition bounds known, can writes be allowed. */
  	su.writable = (rw != 0);
  	su.ready = true;
@@ -614,7 +629,7 @@ index 143db60..efad4b2 100644
  	    want, su.lun, su.first_block, su.nblocks * UFS_BLOCK >> 20,
  	    su.writable ? "read-write" : "read-only", su.dma_pa);
  	sweet_log_start();
-@@ -821,9 +948,10 @@ sweet_ufs_init(void)
+@@ -821,9 +964,10 @@ sweet_ufs_init(void)
  	 */
  	int hw = 0;
  	(void)PE_parse_boot_argn("sweethw", &hw, sizeof(hw));

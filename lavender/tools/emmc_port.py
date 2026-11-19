@@ -53,6 +53,9 @@ src = cut(src, "#define REG_CAP ", "static struct {\n", """#define SD_BLKSIZE   
 #define SD_INT_STATUS   0x30            /* [15:0] normal, [31:16] error */
 #define SD_INT_ENABLE   0x34
 #define SD_INT_SIGNAL   0x38
+#define SD_HOST_CTRL    0x28            /* 8-bit: [4:3] DMA select, 11 = 64-bit ADMA2 */
+#define SD_ADMA_LO      0x58
+#define SD_ADMA_HI      0x5c
 #define SD_CAP          0x40
 #define CQ_CFG          0x08            /* cmdq_mem: CQE enable is bit 0 */
 
@@ -67,11 +70,13 @@ src = cut(src, "#define REG_CAP ", "static struct {\n", """#define SD_BLKSIZE   
 #define INT_XFER_DONE           (1u << 1)
 #define INT_BUF_WR              (1u << 4)
 #define INT_BUF_RD              (1u << 5)
+#define INT_ADMA_ERR            (1u << 25)
 #define INT_ERROR               (1u << 15)
 #define INT_ERRORS              0xffff0000u
 #define INT_ENABLE_ALL          0x03ff003fu     /* normal 0-5, errors 16-25 */
 
 /* transfer mode */
+#define TM_DMA          (1u << 0)
 #define TM_BLKCNT       (1u << 1)
 #define TM_ACMD12       (1u << 2)
 #define TM_READ         (1u << 4)
@@ -84,12 +89,18 @@ src = cut(src, "#define REG_CAP ", "static struct {\n", """#define SD_BLKSIZE   
 #define R1_ERRORS       0xe4300000u
 
 #define UFS_BLOCK       512u            /* lavender: eMMC sector = GPT LBA */
-#define BOUNCE_SIZE     (1u << 20)
+/*
+ * lavender: one ADMA2 descriptor per command, so its 12- or 16-byte size in
+ * 64-bit mode does not matter; 32 KiB fits its 16-bit length field.
+ */
+#define BOUNCE_SIZE     (32u << 10)
 #define CMD_TIMEOUT_NS  (5ull * NSEC_PER_SEC)
+#define ADMA_TRAN_END   0x23            /* valid | end | act = transfer */
 
-/* Layout of the contiguous allocation: only the bounce buffer (PIO, no DMA). */
-#define DMA_BOUNCE      0x0000
-#define DMA_SIZE        BOUNCE_SIZE
+/* Layout of the contiguous DMA allocation (may be above 4 GiB: 64-bit ADMA2). */
+#define DMA_DESC        0x0000
+#define DMA_BOUNCE      0x1000
+#define DMA_SIZE        (DMA_BOUNCE + BOUNCE_SIZE)
 
 """)
 
@@ -113,6 +124,12 @@ static inline void
 ufs_wr16(uint32_t off, uint16_t v)
 {
 	*(volatile uint16_t *)(su.regs + off) = v;
+}
+
+static void
+dma_flush(uint32_t off, uint32_t len)
+{
+	flush_dcache64((addr64_t)(su.dma_pa + off), len, TRUE);
 }
 
 static uint64_t
@@ -217,8 +234,27 @@ sd_cmd(uint32_t idx, uint32_t arg, uint32_t flags, uint32_t blocks, bool write)
 	ufs_wr(SD_INT_STATUS, 0xffffffffu);
 	uint32_t mode = 0;
 	if (blocks) {
+		/*
+		 * lavender phone test 5: PIO reads through the buffer port never drained
+		 * the FIFO on this msm host (Linux, LK and ABL only ever use ADMA2), so
+		 * data moves by one 64-bit ADMA2 descriptor into the bounce buffer.
+		 */
+		uint32_t len = blocks * UFS_BLOCK;
+		uint64_t buf_pa = su.dma_pa + DMA_BOUNCE, desc_pa = su.dma_pa + DMA_DESC;
+		volatile uint32_t *d = (volatile uint32_t *)(su.dma + DMA_DESC);
+		d[0] = (len << 16) | ADMA_TRAN_END;
+		d[1] = (uint32_t)buf_pa;
+		d[2] = (uint32_t)(buf_pa >> 32);
+		d[3] = 0;
+		dma_flush(DMA_DESC, 64);
+		dma_flush(DMA_BOUNCE, len);
+		__builtin_arm_dsb(0xf);
+		uint8_t hc = *(volatile uint8_t *)(su.regs + SD_HOST_CTRL);
+		*(volatile uint8_t *)(su.regs + SD_HOST_CTRL) = (uint8_t)((hc & ~0x18u) | 0x18u);
+		ufs_wr(SD_ADMA_LO, (uint32_t)desc_pa);
+		ufs_wr(SD_ADMA_HI, (uint32_t)(desc_pa >> 32));
 		flags |= CF_DATA;
-		mode = TM_BLKCNT | (write ? 0 : TM_READ) | (blocks > 1 ? TM_MULTI | TM_ACMD12 : 0);
+		mode = TM_DMA | TM_BLKCNT | (write ? 0 : TM_READ) | (blocks > 1 ? TM_MULTI | TM_ACMD12 : 0);
 		ufs_wr16(SD_BLKSIZE, UFS_BLOCK);
 		ufs_wr16(SD_BLKSIZE + 2, (uint16_t)blocks);
 	}
@@ -295,27 +331,11 @@ sd_cmd(uint32_t idx, uint32_t arg, uint32_t flags, uint32_t blocks, bool write)
 			error = EIO;
 		}
 	}
-	uint32_t *buf = (uint32_t *)(su.dma + DMA_BOUNCE);
-	for (uint32_t b = 0; !error && b < blocks; b++) {
-		error = sd_wait(write ? INT_BUF_WR : INT_BUF_RD, write ? PRES_BUF_WR : PRES_BUF_RD,
-		    write ? PRES_BUF_WR : PRES_BUF_RD, deadline, &s);
-		if (error) {
-			break;
-		}
-		ufs_wr(SD_INT_STATUS, write ? INT_BUF_WR : INT_BUF_RD);
-		uint32_t *p = buf + b * (UFS_BLOCK / 4);
-		if (write) {
-			for (unsigned i = 0; i < UFS_BLOCK / 4; i++) {
-				ufs_wr(SD_BUFFER, p[i]);
-			}
-		} else {
-			for (unsigned i = 0; i < UFS_BLOCK / 4; i++) {
-				p[i] = ufs_rd(SD_BUFFER);
-			}
-		}
-	}
-	if (!error && (blocks || flags == CF_R1B)) {
+	if (!error && (blocks || (flags & 0x1f) == CF_R1B)) {
 		error = sd_wait(INT_XFER_DONE, PRES_DAT_INHIBIT, 0, deadline, &s);
+	}
+	if (blocks) {
+		dma_flush(DMA_BOUNCE, blocks * UFS_BLOCK);      /* drop stale lines before the CPU reads */
 	}
 	sd_dump_once(error ? "a failed command" : "the first command");
 	if (!error && (ufs_rd(SD_PRESENT) & PRES_CMD_INHIBIT)) {
@@ -394,10 +414,6 @@ ufs_take_over_host(void)
 	ufs_wr(SD_INT_STATUS, 0xffffffffu);
 	printf("SWEET EMMC: int enable now 0x%x, int status 0x%x\\n",
 	    ufs_rd(SD_INT_ENABLE), ufs_rd(SD_INT_STATUS));
-
-	/* CMD13 SEND_STATUS (RCA 1 as Linux/UEFI assign it): a command without data first */
-	int st = sd_cmd(13, 1u << 16, CF_R1, 0, false);
-	printf("SWEET EMMC: CMD13 -> %d, card status 0x%x\\n", st, ufs_rd(SD_RESP0));
 
 	/* CMD8 SEND_EXT_CSD: proves the card answers, and which area is selected. */
 	int error = sd_cmd(8, 0, CF_R1, 1, false);
