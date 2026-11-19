@@ -20,8 +20,9 @@ concurrency:
 
 jobs:
   build:
-    runs-on: macos-15
-    timeout-minutes: 90
+    # macos-15 (arm64) jobs were never picked up (capacity); the kernel's Intel image works
+    runs-on: macos-15-intel
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
 
@@ -37,6 +38,8 @@ jobs:
           # mk-mesa-mac.sh expects to sit next to mesa/ (its patches and redwood-drm)
           cp mesa/mk-mesa-mac.sh .
           mkdir -p build-mesa
+          # the script puts /opt/homebrew's bison first; on Intel Homebrew lives in /usr/local
+          export PATH="$(brew --prefix bison)/bin:$PATH"
           bash -x mk-mesa-mac.sh || { tail -60 build-mesa/meson-setup.log build-mesa/ninja.log 2>/dev/null; exit 1; }
           ls -la build-mesa/out
 
