@@ -1,5 +1,5 @@
 diff --git a/iokit/Kernel/arm/TopazAdreno.cpp b/iokit/Kernel/arm/TopazAdreno.cpp
-index 98fa999..2f67916 100644
+index 98fa999..4809e2a 100644
 --- a/iokit/Kernel/arm/TopazAdreno.cpp
 +++ b/iokit/Kernel/arm/TopazAdreno.cpp
 @@ -110,7 +110,7 @@ uint32_t gpu_log;
@@ -11,7 +11,7 @@ index 98fa999..2f67916 100644
  extern "C" bool topaz_rpm_write(uint32_t set, uint32_t type, uint32_t id, uint32_t key, uint32_t value);
  extern "C" int topaz_rpm_status;
  static uint32_t submits, submit_ibs, submit_full;     /* gpudiag=2 statistics */
-@@ -572,6 +572,20 @@ power_up(void)
+@@ -572,6 +572,19 @@ power_up(void)
  			core_mhz = 300;
  		}
  	}
@@ -25,14 +25,13 @@ index 98fa999..2f67916 100644
 +		if (PE_parse_boot_argn("lv_ddr_khz", &khz, sizeof(khz)) && khz != 0) {
 +			bool ok = topaz_rpm_write(0, 0x326b6c63u /* clk2 */, 0, 0x007a484bu /* KHz */, khz);
 +			ddr_khz = ok ? khz : 0;
-+			IOLog("TopazGPU: DDR %u kHz %s (RPM status %d)
-+", khz, ok ? "voted" : "NOT voted", topaz_rpm_status);
++			IOLog("TopazGPU: DDR %u kHz %s (RPM status %d)\n", khz, ok ? "voted" : "NOT voted", topaz_rpm_status);
 +		}
 +	}
  	/* gfx3d from GPLL0 (600 MHz): /2 = 300 (default) or /1 = 600; gpu_mhz=19: XO */
  	if (core_mhz < 300) {
  		core_mhz = 19;
-@@ -1518,11 +1532,11 @@ topaz_adreno_thread(__unused void *param, __unused wait_result_t wr_)
+@@ -1518,11 +1531,11 @@ topaz_adreno_thread(__unused void *param, __unused wait_result_t wr_)
  		uint32_t diag = 0;
  		if (PE_parse_boot_argn("gpudiag", &diag, sizeof(diag)) && diag == 1) {
  			panic("TopazGPU diag (lavender a512): start %s | GX %08x CX %08x | RBBM_STATUS %08x SECVID_TRUST %08x "
