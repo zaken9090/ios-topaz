@@ -7,7 +7,7 @@ ME_INIT and SET_SECURE_MODE 0. RedwoodGPU reports chip 5.1.2.0, GMEM 272 KB.
 GPU pool 0xa4000000 (384 MB). Boot-arg gpu=1 (gpu_mhz=19/300/600).
 
 diff --git a/iokit/Kernel/arm/TopazAdreno.cpp b/iokit/Kernel/arm/TopazAdreno.cpp
-index 16da336..26c0108 100644
+index 16da336..e5d77d5 100644
 --- a/iokit/Kernel/arm/TopazAdreno.cpp
 +++ b/iokit/Kernel/arm/TopazAdreno.cpp
 @@ -55,16 +55,23 @@ void redwood_tl(const char *format, ...) __printflike(1, 2);
@@ -663,7 +663,7 @@ index 16da336..26c0108 100644
  	IOLockUnlock(hw_lock);
 +	{
 +		uint32_t diag = 0;
-+		if (PE_parse_boot_argn("gpudiag", &diag, sizeof(diag)) && diag != 0) {
++		if (PE_parse_boot_argn("gpudiag", &diag, sizeof(diag)) && diag == 1) {
 +			panic("TopazGPU diag (lavender a512): start %s | GX %08x CX %08x | RBBM_STATUS %08x SECVID_TRUST %08x "
 +			    "CP_HW_FAULT %08x INT %08x | rptr %u wptr %u | SMMU cb0 SCTLR %08x FSR %08x | core %u MHz",
 +			    ok ? "OK" : "FAILED", gpucc ? rd(gpucc, 0x1094) : 0, gpucc ? rd(gpucc, 0x1004) : 0,
