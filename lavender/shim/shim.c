@@ -1568,8 +1568,12 @@ park:
 		__asm__ volatile("wfe");
 }
 
+static void silver_pll_relock_from_gold(void);
+
 void secondary_main(uint64_t slot)
 {
+	if (gold_go == 2)
+		silver_pll_relock_from_gold();
 	if (gold_go)
 		gold_main();
 	probe_secondary(slot);
@@ -1585,6 +1589,198 @@ void exc_handler(uint64_t slot, uint64_t esr, uint64_t elr, uint64_t far)
 	kv(" ELR ", elr, 10);
 	kv(" FAR ", far, 10);
 	puts_("hold POWER 10s to reboot\n");
+}
+
+/* ---------------- lavender CPU clock: silver PLL relock from gold (2026-11-20) ---------------- */
+/*
+ * Silver (cpu0-3, where the 4K XNU runs) is clocked straight from its PLL (pwrcl 0x17916000,
+ * L * 19.2 MHz; XBL leaves L 72 = 1382 MHz) and bypasses its RCG, so its PLL cannot be relocked
+ * from silver itself. Gold 0x100 is woken with PSCI CPU_ON, relocks the silver PLL at the new L
+ * (the sequence gold_pll_relock() used on the gold PLL), says so and switches itself off; silver
+ * stalls while its clock is away and goes on afterwards. No voltage is changed: XBL's APC0 level
+ * (CPRh closed loop for its corner) stays. OSM speed-bin table (DT qcom,pwrcl-speedbin0-v0):
+ * L 15 288, 33 633.6, 47 902.4, 58 1113.6, 73 1401.6, 80 1536, 91 1747.2, 96 1843.2 MHz.
+ *
+ * Payload boot-args read by the shim (they also reach XNU, which ignores them):
+ *   lv_cpudiag=1     read-only APC/CPRh/SAW/APM dump, then a silver step test (L 76..96, a
+ *                    checksum loop at each step), no XNU; stops at the first wrong checksum
+ *   lv_silver_l=NN   relock silver at L NN (40..100) before XNU
+ */
+#define PSCI_CPU_OFF		0x84000002UL
+#define PSCI_AFFINITY_INFO	0xc4000004UL
+static volatile uint32_t relock_l, relock_done;
+
+static void silver_pll_relock_from_gold(void)
+{
+	uint32_t l = relock_l;
+
+	wr32(PLL_PWRCL + 0x0, 0x0);
+	wr32(PLL_PWRCL + 0x4, l);
+	wr32(PLL_PWRCL + 0x0, 0x2);
+	for (volatile int i = 0; i < 20000; i++)
+		;
+	wr32(PLL_PWRCL + 0x0, 0x6);
+	for (volatile int i = 0; i < 100000; i++)
+		;
+	wr32(PLL_PWRCL + 0x0, 0x7);
+	for (int n = 0; !(rd32(PLL_PWRCL + 0x2c) & (1u << 16)) && n < 1000000; n++)
+		;
+	relock_done = 1;
+	__asm__ volatile("dsb sy" ::: "memory");
+	(void)smc(PSCI_CPU_OFF, 0, 0, 0);
+	for (;;)
+		__asm__ volatile("wfe");
+}
+
+static int silver_relock(uint32_t l)
+{
+	relock_l = l;
+	relock_done = 0;
+	gold_go = 2;
+	__asm__ volatile("dsb sy" ::: "memory");
+	/* (gold may still be shutting down from the previous step) */
+	for (int n = 0; n < 1000 && smc(PSCI_AFFINITY_INFO, GOLD_MPIDR, 0, 0) != 1; n++)
+		for (volatile int i = 0; i < 10000; i++)
+			;
+	int64_t r = (int64_t)smc(PSCI_CPU_ON, GOLD_MPIDR, (uintptr_t)secondary_entry, 4);
+	if (r != 0)
+		return (int)r;
+	uint64_t t = ticks() + RD(cntfrq_el0);
+	while (!relock_done && ticks() < t)
+		;
+	return relock_done ? 0 : -100;
+}
+
+static const char *bootarg(const char *cmdline, const char *key)
+{
+	for (const char *p = cmdline; p && *p; p++) {
+		if (p != cmdline && p[-1] != ' ')
+			continue;
+		const char *k = key, *q = p;
+		while (*k && *q == *k) {
+			k++;
+			q++;
+		}
+		if (*k == 0)
+			return q;
+	}
+	return 0;
+}
+
+static uint32_t bootarg_u32(const char *cmdline, const char *key, uint32_t dflt)
+{
+	const char *v = bootarg(cmdline, key);
+	uint32_t n = 0;
+	if (!v || *v < '0' || *v > '9')
+		return dflt;
+	while (*v >= '0' && *v <= '9')
+		n = n * 10 + (uint32_t)(*v++ - '0');
+	return n;
+}
+
+/* ALU + memory checksum, the same every time on a healthy core */
+static uint64_t stress_sum(void)
+{
+	uint64_t x = 0x9e3779b97f4a7c15UL, s = 0;
+	for (int r = 0; r < 200; r++) {
+		for (int i = 0; i < 512; i++) {
+			x ^= x << 13;
+			x ^= x >> 7;
+			x ^= x << 17;
+			test_buf[i] = x + (uint64_t)i * 0x100000001UL;
+		}
+		for (int i = 0; i < 512; i++)
+			s = (s ^ test_buf[i]) * 0x100000001b3UL + (s >> 29);
+	}
+	return s;
+}
+
+static void cpu_diag_dump(void)
+{
+	fg = CYAN;
+	puts_("\n-- lavender CPU diag (read only) --\n");
+	fg = WHITE;
+	pll_line("PLL silver", PLL_PWRCL);
+	pll_line("PLL gold  ", PLL_PERFCL);
+	reg("silver USER_CTL ", PLL_PWRCL + 0xc);
+	reg("gold   USER_CTL ", PLL_PERFCL + 0xc);
+	reg("silver RCG cmd  ", 0x17911050UL);
+	reg("silver RCG cfg  ", 0x17911054UL);
+	reg("gold   RCG cmd  ", 0x17811050UL);
+	reg("gold   RCG cfg  ", 0x17811054UL);
+	reg("SAW4 cl0 PMICSTS", 0x17912c18UL);
+	reg("SAW4 cl1 PMICSTS", 0x17812c18UL);
+	reg("CPRH apc0 STATUS", 0x179cbaa4UL);
+	reg("CPRH apc1 STATUS", 0x179c7aa4UL);
+	reg("APM cl0 mode    ", 0x179d0004UL);
+	reg("APM cl0 status  ", 0x179d000cUL);
+	reg("APM cl1 mode    ", 0x179d0010UL);
+	reg("APM cl1 status  ", 0x179d0018UL);
+	reg("ITM present     ", 0x179d143cUL);
+	reg("OSM pwrcl 0x000 ", OSM_PWRCL + 0x000);
+	reg("OSM pwrcl 0x900 ", OSM_PWRCL + 0x900);
+	reg("efuse 0x784130  ", 0x784130UL);
+	reg("efuse 0x784134  ", 0x784134UL);
+	for (uint32_t o = 0x900; o < 0x980; o += 0x10) {
+		puts_("CPRH apc0 +");
+		puthex(o, 3);
+		puts_(": ");
+		for (uint32_t k = 0; k < 16; k += 4) {
+			puthex(rd32(0x179c8000UL + o + k), 8);
+			putc_(' ');
+		}
+		putc_('\n');
+	}
+	puts_("silver ");
+	putdec((int64_t)gold_mhz());
+	puts_(" MHz now\n");
+}
+
+static void cpu_step_test(void)
+{
+	static const uint32_t steps[] = { 72, 76, 80, 84, 88, 92, 96 };
+	uint64_t ref = stress_sum();
+	fg = CYAN;
+	puts_("\n-- silver step test (no voltage change) --\n");
+	fg = WHITE;
+	for (unsigned i = 0; i < sizeof(steps) / sizeof(steps[0]); i++) {
+		puts_("L ");
+		putdec(steps[i]);
+		puts_(" (");
+		putdec((int64_t)steps[i] * 192 / 10);
+		puts_(" MHz): relock ");
+		__asm__ volatile("dsb sy" ::: "memory");
+		int r = silver_relock(steps[i]);
+		if (r != 0) {
+			fg = RED;
+			puts_("FAILED ");
+			putdec(r);
+			putc_('\n');
+			fg = WHITE;
+			return;
+		}
+		puts_("ok, ");
+		putdec((int64_t)gold_mhz());
+		puts_(" MHz measured, checksums ");
+		int bad = 0;
+		for (int k = 0; k < 20; k++)
+			bad += stress_sum() != ref;
+		if (bad) {
+			fg = RED;
+			putdec(bad);
+			puts_("/20 WRONG\n");
+			fg = WHITE;
+			puts_("back to L 72\n");
+			silver_relock(72);
+			return;
+		}
+		fg = GREEN;
+		puts_("20/20 ok\n");
+		fg = WHITE;
+	}
+	fg = GREEN;
+	puts_("all steps passed (L 96 = 1843 MHz)\n");
+	fg = WHITE;
 }
 
 /* ---------------- v2 main: silver -> gold hand-off ---------------- */
@@ -1625,6 +1821,26 @@ void shim_main(const unsigned char *dtb, uintptr_t load)
 			mdp_probe();
 		if (0)
 			gpu_probe();
+		if (pl && bootarg_u32(pl->cmdline, "lv_cpudiag=", 0)) {
+			cpu_diag_dump();
+			cpu_step_test();
+			cpu_diag_dump();
+			fg = CYAN;
+			puts_("\nCPU diag done. Photo, then POWER+VOL- for fastboot\n");
+			for (;;)
+				__asm__ volatile("wfe");
+		}
+		if (pl) {
+			uint32_t l = bootarg_u32(pl->cmdline, "lv_silver_l=", 0);
+			if (l >= 40 && l <= 100) {
+				puts_("\nsilver PLL -> L ");
+				putdec(l);
+				int r = silver_relock(l);
+				puts_(r == 0 ? " ok, " : " FAILED, ");
+				putdec((int64_t)gold_mhz());
+				puts_(" MHz\n");
+			}
+		}
 		if (pl && pl->virt_base >= 0xfffffff000000000UL && !GPU_PROBE_ON_GOLD) {
 			fg = CYAN;
 			puts_("\n== SILVER: 4K payload found, booting XNU ==\n");
