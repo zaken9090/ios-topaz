@@ -1,5 +1,28 @@
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+index 0879059..a1808cc 100644
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -336,6 +336,18 @@ AppleCLCD::start(IOService *provider)
+ 	/* x rounded down to 4 pixels: the panel window must start 16-byte aligned (MDP fetch) */
+ 	fOffX = ((int32_t)(fLogicalW - fWidth) / 2) & ~3;
+ 	fOffY = (int32_t)(fLogicalH - fHeight) / 2;
++	/*
++	 * lavender: the 2340-row panel shows rows sweetfb_offy.. of the presented 2436 (default 0: the
++	 * whole status bar, which centred lost 48 rows of under the rounded corners; the 96 rows cut at
++	 * the bottom are inside the home indicator's safe area). SweetHID.cpp maps touches the same way.
++	 */
++	{
++		uint32_t offy = 0;
++		PE_parse_boot_argn("sweetfb_offy", &offy, sizeof(offy));
++		if (fLogicalH > fHeight && offy <= fLogicalH - fHeight) {
++			fOffY = (int32_t)offy;
++		}
++	}
+ 	fLock = IOLockAlloc();
+ 	fClients = OSArray::withCapacity(4);
+ 	fSurface = sweet_surface_create_physical(fPhys, fWidth, fHeight, fRowBytes, SWEET_FB_FORMAT_BGRA);
 diff --git a/iokit/Kernel/arm/hid/SweetHID.cpp b/iokit/Kernel/arm/hid/SweetHID.cpp
-index d2f4fa1..4db5e62 100644
+index d2f4fa1..50121db 100644
 --- a/iokit/Kernel/arm/hid/SweetHID.cpp
 +++ b/iokit/Kernel/arm/hid/SweetHID.cpp
 @@ -356,6 +356,7 @@ OSDefineMetaClassAndStructors(SweetHIDButtons, IOHIDEventService);
@@ -10,7 +33,7 @@ index d2f4fa1..4db5e62 100644
  class SweetHIDTouch : public IOHIDEventService {
  	OSDeclareDefaultStructors(SweetHIDTouch);
  public:
-@@ -435,9 +436,9 @@ SweetHIDTouch::start(IOService *provider)
+@@ -435,9 +436,16 @@ SweetHIDTouch::start(IOService *provider)
  	int native = 0;
  	PE_parse_boot_argn("sweetfb_native", &native, sizeof(native));
  	fLogicalW = native ? 1080 : 1125;
@@ -19,10 +42,17 @@ index d2f4fa1..4db5e62 100644
  	fOffX = ((fLogicalW - 1080) / 2) & ~3;           /* as SweetFramebuffer.cpp */
 -	fOffY = (fLogicalH - 2400) / 2;
 +	fOffY = (fLogicalH - SWEET_PANEL_H) / 2;           /* lavender: panel 1080x2340 */
++	{
++		uint32_t offy = 0;                               /* as SweetFramebuffer.cpp (sweetfb_offy, default 0) */
++		PE_parse_boot_argn("sweetfb_offy", &offy, sizeof(offy));
++		if (fLogicalH > SWEET_PANEL_H && (int)offy <= fLogicalH - SWEET_PANEL_H) {
++			fOffY = (int)offy;
++		}
++	}
  	/* The digitizer covers the main display (backboardd maps it 1:1). */
  	setProperty("DisplayIntegrated", kOSBooleanTrue);
  	setProperty("SurfaceWidth", (unsigned long long)(68 << 16), 32);	/* mm, 16.16 */
-@@ -459,7 +460,7 @@ SweetHIDTouch::touch(int finger, bool down, int x, int y)
+@@ -459,7 +467,7 @@ SweetHIDTouch::touch(int finger, bool down, int x, int y)
  		return;
  	}
  	x = x < 0 ? 0 : (x > 1079 ? 1079 : x);
@@ -31,7 +61,7 @@ index d2f4fa1..4db5e62 100644
  
  	IOLockLock(fLock);
  	bool was = fDown[finger];
-@@ -473,7 +474,7 @@ SweetHIDTouch::touch(int finger, bool down, int x, int y)
+@@ -473,7 +481,7 @@ SweetHIDTouch::touch(int finger, bool down, int x, int y)
  	}
  	if (!was && down) {
  		fEdge[finger] = x < SWEET_TOUCH_EDGE_PX || x > 1079 - SWEET_TOUCH_EDGE_PX ||
