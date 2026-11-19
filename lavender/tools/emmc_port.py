@@ -151,20 +151,34 @@ sd_wait(uint32_t want, uint32_t pmask, uint32_t pval, uint64_t deadline, uint32_
 	}
 }
 
-/* lavender bring-up: every standard SDHCI register once, after the first command */
+/* lavender bring-up: register reads for the photo; never the buffer port (it pops data) */
+static uint32_t
+sd_peek(uint32_t off)
+{
+	return off == SD_BUFFER ? 0xbbbbbbbbu : ufs_rd(off);
+}
+
+/* the first two commands: every standard SDHCI register, the msm vendor block once */
 static void
 sd_dump_once(const char *why)
 {
-	static bool dumped;
-	if (dumped) {
+	static unsigned dumped;
+	if (dumped >= 2) {
 		return;
 	}
-	dumped = true;
+	dumped++;
 	printf("SWEET EMMC: regs after %s:\\n", why);
 	for (uint32_t off = 0; off < 0x80; off += 0x20) {
 		printf("SWEET EMMC: %02x: %08x %08x %08x %08x %08x %08x %08x %08x\\n", off,
-		    ufs_rd(off), ufs_rd(off + 4), ufs_rd(off + 8), ufs_rd(off + 12),
-		    ufs_rd(off + 16), ufs_rd(off + 20), ufs_rd(off + 24), ufs_rd(off + 28));
+		    sd_peek(off), sd_peek(off + 4), sd_peek(off + 8), sd_peek(off + 12),
+		    sd_peek(off + 16), sd_peek(off + 20), sd_peek(off + 24), sd_peek(off + 28));
+	}
+	if (dumped == 1) {
+		for (uint32_t off = 0x100; off < 0x140; off += 0x20) {
+			printf("SWEET EMMC: %03x: %08x %08x %08x %08x %08x %08x %08x %08x\\n", off,
+			    ufs_rd(off), ufs_rd(off + 4), ufs_rd(off + 8), ufs_rd(off + 12),
+			    ufs_rd(off + 16), ufs_rd(off + 20), ufs_rd(off + 24), ufs_rd(off + 28));
+		}
 	}
 	printf("SWEET EMMC: int status as 16-bit: normal %04x error %04x\\n",
 	    *(volatile uint16_t *)(su.regs + SD_INT_STATUS), *(volatile uint16_t *)(su.regs + SD_INT_STATUS + 2));
@@ -216,6 +230,40 @@ sd_cmd(uint32_t idx, uint32_t arg, uint32_t flags, uint32_t blocks, bool write)
 	 */
 	ufs_wr16(SD_CMD, (uint16_t)mode);
 	ufs_wr16(SD_CMD + 2, (uint16_t)(idx << 8 | flags));
+
+	/*
+	 * lavender bring-up: for the first two commands record every change of
+	 * (present state, interrupt status) during 20 ms, then print the timeline.
+	 */
+	static unsigned traces;
+	if (traces < 2) {
+		traces++;
+		uint32_t tp[16], ts[16], tus[16], n = 0, lp = ~0u, ls = ~0u;
+		uint64_t t0 = mach_absolute_time(), lim, ns;
+		nanoseconds_to_absolutetime(20 * NSEC_PER_MSEC, &lim);
+		while (mach_absolute_time() - t0 < lim && n < 16) {
+			uint32_t pp = ufs_rd(SD_PRESENT), ss = ufs_rd(SD_INT_STATUS);
+			if (pp != lp || ss != ls) {
+				absolutetime_to_nanoseconds(mach_absolute_time() - t0, &ns);
+				tp[n] = pp;
+				ts[n] = ss;
+				tus[n] = (uint32_t)(ns / 1000);
+				n++;
+				lp = pp;
+				ls = ss;
+			}
+		}
+		printf("SWEET EMMC: CMD%u trace (us present status):\\n", idx);
+		for (uint32_t i = 0; i < n; i += 2) {
+			if (i + 1 < n) {
+				printf("SWEET EMMC:  %u %08x %08x | %u %08x %08x\\n",
+				    tus[i], tp[i], ts[i], tus[i + 1], tp[i + 1], ts[i + 1]);
+			} else {
+				printf("SWEET EMMC:  %u %08x %08x\\n", tus[i], tp[i], ts[i]);
+			}
+		}
+		printf("SWEET EMMC: CMD%u resp %08x\\n", idx, ufs_rd(SD_RESP0));
+	}
 
 	/*
 	 * lavender (phone test 2): CMD inhibit stayed set and no status bit came
@@ -346,6 +394,10 @@ ufs_take_over_host(void)
 	ufs_wr(SD_INT_STATUS, 0xffffffffu);
 	printf("SWEET EMMC: int enable now 0x%x, int status 0x%x\\n",
 	    ufs_rd(SD_INT_ENABLE), ufs_rd(SD_INT_STATUS));
+
+	/* CMD13 SEND_STATUS (RCA 1 as Linux/UEFI assign it): a command without data first */
+	int st = sd_cmd(13, 1u << 16, CF_R1, 0, false);
+	printf("SWEET EMMC: CMD13 -> %d, card status 0x%x\\n", st, ufs_rd(SD_RESP0));
 
 	/* CMD8 SEND_EXT_CSD: proves the card answers, and which area is selected. */
 	int error = sd_cmd(8, 0, CF_R1, 1, false);
