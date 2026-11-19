@@ -38,7 +38,10 @@
 - ⚠️ Обмеження: ABL lavender має приймати великий Image (ядро ~30–60 МБ + ramdisk). Перевірити межу (max-download 768 МБ, але буфер розпакування ядра може бути меншим).
 - Потрібен IPSW iPhone X 16.7.16 (~6 ГБ від Apple) і Linux-інструменти (apfs-fuse, hfsprogs) → WSL (встановлення з дозволу).
 
-### M3. eMMC замість UFS
+### M3. eMMC замість UFS — ✅ читання працює (2026-11-19)
+`xnu/patches/0991-lavender-emmc.patch` (`tools/emmc_port.py`): sdhc_1, 64-бітний ADMA2 одним дескриптором (PIO на цьому msm-хості не спорожнює FIFO), `rd=ufsroot0` → `BSD root: ufsroot0`, HFS читає заголовок тому з userdata. Запис (CMD24/25) ще не перевірено.
+
+Первинний план M3:
 - Новий драйвер у стилі `sweet_ufs.c`: SDHCI (контролер `c0c4000.sdhci`, eMMC 5.1), «переймаємо» стан, який лишив ABL; спершу тільки читання, розділ `userdata` (mmcblk0p66, ~54.6 ГБ).
 - Тоді `rd=...` на `userdata`, прошивка кореня `fastboot flash userdata` (з дозволу; стирає Android-дані, користувач знає).
 
