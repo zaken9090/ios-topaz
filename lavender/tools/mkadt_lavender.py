@@ -31,6 +31,8 @@ SOC_BASE = 0x01000000
 GICD, GICD_SIZE = 0x17a00000, 0x10000
 GICR, GICR_SIZE = 0x17b00000, 0x100000
 FB_W, FB_H, FB_STRIDE = 1080, 2340, 1080 * 4
+EMMC, EMMC_SIZE = 0x0c0c4000, 0x1000         # sdhc_1 hc_mem (sdm660.dtsi)
+EMMC_CQ, EMMC_CQ_SIZE = 0x0c0c5000, 0x1000   # sdhc_1 cmdq_mem
 FB, FB_SIZE = 0x9d400000, 0x9a4000          # 1080*2340*4 rounded up to 16K
 TIMEBASE = 19200000
 VTIMER_INTID = 19
@@ -148,6 +150,13 @@ def build(seed=None):
         ('height', u32(FB_H)),
         ('stride', u32(FB_STRIDE)),
     ])
+    # lavender: eMMC host sdhc_1 for the ufsroot0 root device (xnu patch 0991):
+    # hc_mem (standard SDHCI registers), then cmdq_mem (only read, to check CQE is off)
+    emmc = node('sweet-ufs', [
+        ph(),
+        ('compatible', cstr('qcom,sdhci-msm-v5')),
+        ('reg', u64(EMMC, EMMC_SIZE, EMMC_CQ, EMMC_CQ_SIZE)),
+    ])
     defaults = node('defaults', [ph(), ('no-effaceable-storage', u32(1))])
     buttons = node('buttons', [
         ph(),
@@ -170,7 +179,7 @@ def build(seed=None):
         ('manufacturer', cstr('Apple Inc.')),
         ('#address-cells', u32(2)),
         ('#size-cells', u32(2)),
-    ], [chosen, defaults, cpus, arm_io, fbcon, buttons] + product)
+    ], [chosen, defaults, cpus, arm_io, fbcon, emmc, buttons] + product)
 
 
 if __name__ == '__main__':
