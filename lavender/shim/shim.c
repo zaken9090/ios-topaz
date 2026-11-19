@@ -657,6 +657,104 @@ static void gold_clock_tune(void)
 		__asm__ volatile("wfe");
 }
 
+/*
+ * MDP probe (no XNU): which SDM660 MDP5 source pipe scans the ABL splash
+ * (0x9d400000), which CTL drives it, and does pointing that pipe at another
+ * buffer + CTL flush switch the panel (needed for double-buffered frames)?
+ * Layout from the lavender DTB: mdp_phys 0xc900000, VIG 0x5000/0x7000,
+ * DMA 0x25000/0x27000/0x29000, CTL 0x2000 + n*0x200, FLUSH at +0x18.
+ */
+#define MDP_BASE	0x0c900000UL
+#define MDP_TEST_BUF	0xc0000000UL
+
+static void mdp_probe(void)
+{
+	static const uint32_t pipes[] = {0x5000, 0x7000, 0x25000, 0x27000, 0x29000};
+	static const char names[] = "vig0vig1dma0dma1dma2";  /* no pointer table: no ABS64 relocs */
+	static const uint32_t flushbit[] = {1u << 0, 1u << 1, 1u << 11, 1u << 12, 1u << 13};
+	fg = CYAN;
+	puts_("\n-- MDP probe --\n");
+	fg = WHITE;
+	reg("mdp hw ver", MDP_BASE + 0x0);
+	reg("mdp 1000  ", MDP_BASE + 0x1000);
+	int found = -1;
+	for (int i = 0; i < 5; i++) {
+		uintptr_t b = MDP_BASE + pipes[i];
+		for (int k = 0; k < 4; k++)
+			putc_(names[i * 4 + k]);
+		puts_(" size ");
+		puthex(rd32(b + 0x0), 8);
+		puts_(" addr ");
+		puthex(rd32(b + 0x14), 8);
+		puts_(" stride ");
+		puthex(rd32(b + 0x24), 8);
+		puts_(" fmt ");
+		puthex(rd32(b + 0x30), 8);
+		putc_('\n');
+		if (rd32(b + 0x14) == FB_BASE)
+			found = i;
+	}
+	int ctl = -1;
+	for (int c = 0; c < 5; c++) {
+		uintptr_t b = MDP_BASE + 0x2000 + (uintptr_t)c * 0x200;
+		puts_("ctl");
+		putdec(c);
+		puts_(" lm0 ");
+		puthex(rd32(b + 0x0), 8);
+		puts_(" lm1 ");
+		puthex(rd32(b + 0x4), 8);
+		puts_(" top ");
+		puthex(rd32(b + 0x14), 8);
+		puts_(" flush ");
+		puthex(rd32(b + 0x18), 8);
+		putc_('\n');
+		if (ctl < 0 && rd32(b + 0x14) != 0)
+			ctl = c;
+	}
+	puts_("pipe ");
+	putdec(found);
+	puts_(" ctl ");
+	putdec(ctl);
+	putc_('\n');
+	if (found < 0 || ctl < 0) {
+		puts_("no splash pipe/ctl - stop\n");
+		goto park;
+	}
+	{
+		uintptr_t pb = MDP_BASE + pipes[found];
+		uintptr_t cb = MDP_BASE + 0x2000 + (uintptr_t)ctl * 0x200;
+		uint32_t orig = rd32(pb + 0x14);
+		/* test frame: green/blue bands in a buffer of our own */
+		volatile uint32_t *t = (volatile uint32_t *)MDP_TEST_BUF;
+		for (uint32_t y = 0; y < FB_H; y++)
+			for (uint32_t x = 0; x < FB_W; x++)
+				t[y * FB_W + x] = ((y / 100) & 1) ? 0xff00c000u : 0xff0040ffu;
+		__asm__ volatile("dsb sy" ::: "memory");
+		puts_("switching pipe to test buffer for 4 s (expect green/blue bands)\n");
+		delay_ms(1500);
+		wr32(pb + 0x14, (uint32_t)MDP_TEST_BUF);
+		wr32(cb + 0x18, flushbit[found] | (1u << 17));
+		delay_ms(4000);
+		uint32_t fl = rd32(cb + 0x18);
+		wr32(pb + 0x14, orig);
+		wr32(cb + 0x18, flushbit[found] | (1u << 17));
+		delay_ms(100);
+		puts_("back on splash; flush after test ");
+		puthex(fl, 8);
+		puts_(" now ");
+		puthex(rd32(cb + 0x18), 8);
+		puts_(" addr ");
+		puthex(rd32(pb + 0x14), 8);
+		putc_('\n');
+	}
+park:
+	fg = GREEN;
+	puts_("MDP PROBE ONLY: did the bands show? photo, then POWER + VOL DOWN\n");
+	fg = WHITE;
+	for (;;)
+		__asm__ volatile("wfe");
+}
+
 static void osm_probe(void)
 {
 	fg = CYAN;
@@ -1064,6 +1162,8 @@ void shim_main(const unsigned char *dtb, uintptr_t load)
 		 * 1/4 clock. Boot it right here on silver cpu0.
 		 */
 		const struct payload *pl = find_payload();
+		if (0)
+			mdp_probe();
 		if (pl && pl->virt_base >= 0xfffffff000000000UL) {
 			fg = CYAN;
 			puts_("\n== SILVER: 4K payload found, booting XNU ==\n");

@@ -40,6 +40,12 @@ GOLD_MPIDR = (0x100, 0x101, 0x102, 0x103)
 # --silver: 4 KiB-page kernel (TOPAZ_4K) on the A53 cluster (no 16K granule; gold runs at 1/4 clock)
 SILVER_MPIDR = (0x0, 0x1, 0x2, 0x3)
 SILVER = '--silver' in sys.argv
+if SILVER:
+    # 4K kernel: RAM from 0xc0000000 (lower bank above every carve-out, L1 index 3,
+    # clear of the splash's L1 index 2) to the end of the upper bank: 3 GB, and the
+    # MDP (32-bit addresses) can scan flip buffers below 4 GB
+    PHYS_BASE = 0xc0000000
+    MEM_SIZE = 0xbe000000
 SWEET_ECID = 0x4c4156454e000001             # 'LAVEN' + 1, synthetic
 
 BOOT_MANIFEST_HASH = hashlib.sha384(b'lavender boot manifest').digest()
