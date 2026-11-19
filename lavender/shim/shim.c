@@ -664,6 +664,10 @@ static void gold_clock_tune(void)
  * Layout from the lavender DTB: mdp_phys 0xc900000, VIG 0x5000/0x7000,
  * DMA 0x25000/0x27000/0x29000, CTL 0x2000 + n*0x200, FLUSH at +0x18.
  */
+/* 1: run gpu_probe() on gold with the MMU on (the hypervisor emulates SMMU
+ * stream-mapping writes only for a guest with its MMU on?), no XNU */
+#define GPU_PROBE_ON_GOLD	0
+
 #define MDP_BASE	0x0c900000UL
 #define MDP_TEST_BUF	0xc0000000UL
 
@@ -783,6 +787,265 @@ static int poll_set(uintptr_t a, uint32_t mask, int want_set)
 	return 0;
 }
 
+#if __has_include("out/gpufw.h")
+#include "out/gpufw.h"
+#define HAVE_GPUFW 1
+/*
+ * GPU CP probe, after gpu_probe() powered the Adreno 512 (MMU off, physical
+ * addresses; topaz TopazAdreno.cpp flow with the a5xx registers of Linux
+ * a5xx_gpu.c): zap shader through TZ PIL (PAS 13), GPU SMMU context bank 0
+ * pass-through, minimal a5xx init, PM4/PFP microcode, ringbuffer, ME_INIT,
+ * SET_SECURE_MODE 0 and a CP_MEM_WRITE we read back.
+ */
+#define ZAP_PA		0xbfe00000UL
+#define META_PA		0xbfd00000UL
+#define PM4_PA		0xbfc00000UL
+#define PFP_PA		0xbfc10000UL
+#define RING_PA		0xbfb00000UL
+#define SCRATCH_PA	0xbfb10000UL
+#define RB_DW		(0x8000 / 4)
+#define GSMMU		0x05040000UL
+#define gw(r, v)	wr32(GPUREG(r), (v))
+#define gr(r)		rd32(GPUREG(r))
+
+static uint64_t scm6(uint64_t fn, uint64_t info, uint64_t a, uint64_t b, uint64_t c, uint64_t *res1)
+{
+	register uint64_t x0 __asm__("x0") = fn, x1 __asm__("x1") = info, x2 __asm__("x2") = a,
+		x3 __asm__("x3") = b, x4 __asm__("x4") = c, x5 __asm__("x5") = 0, x6 __asm__("x6") = 0;
+	__asm__ volatile("smc #0" : "+r"(x0), "+r"(x1), "+r"(x2), "+r"(x3), "+r"(x4), "+r"(x5), "+r"(x6) : :
+			 "x7", "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15", "x16", "x17", "memory");
+	for (int n = 0; x0 == 1 && n < 100000; n++) {	/* interrupted: resume with the session in x6 */
+		uint64_t session = x6;
+		x0 = 1; x1 = info; x2 = a; x3 = b; x4 = c; x5 = 0; x6 = session;
+		__asm__ volatile("smc #0" : "+r"(x0), "+r"(x1), "+r"(x2), "+r"(x3), "+r"(x4), "+r"(x5), "+r"(x6) : :
+				 "x7", "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15", "x16", "x17", "memory");
+	}
+	if (res1)
+		*res1 = x1;
+	return x0;
+}
+
+#define SCM_PIL(cmd)	(0x42000000u | (0x02u << 8) | (cmd))
+
+static void st_line(const char *what, uint64_t st, uint64_t res)
+{
+	puts_(what);
+	puts_(" st ");
+	puthex(st, 8);
+	puts_(" res ");
+	puthex(res, 8);
+	putc_('\n');
+}
+
+static uint32_t par4(uint32_t v)
+{
+	return (0x9669 >> (0xF & (v ^ (v >> 4) ^ (v >> 8) ^ (v >> 12) ^ (v >> 16) ^ (v >> 20) ^ (v >> 24) ^ (v >> 28)))) & 1;
+}
+
+static uint32_t pkt7(uint32_t op, uint32_t cnt)
+{
+	return 0x70000000u | cnt | (par4(cnt) << 15) | ((op & 0x7F) << 16) | (par4(op) << 23);
+}
+
+static uint32_t rb_w;
+
+static void emit(uint32_t v)
+{
+	((volatile uint32_t *)RING_PA)[rb_w % RB_DW] = v;
+	rb_w++;
+}
+
+static int kick_wait(const char *what)
+{
+	__asm__ volatile("dsb sy" ::: "memory");
+	gw(0x807, rb_w % RB_DW);
+	int ok = 0;
+	for (int i = 0; i < 2000000; i++) {
+		if (gr(0x806) == rb_w % RB_DW) {
+			ok = 1;
+			break;
+		}
+	}
+	puts_(what);
+	puts_(ok ? ": done" : ": STUCK");
+	puts_(" rptr ");
+	puthex(gr(0x806), 4);
+	puts_(" wptr ");
+	puthex(rb_w % RB_DW, 4);
+	puts_(" status ");
+	puthex(gr(0x4f5), 8);
+	puts_(" int ");
+	puthex(gr(0x4e1), 8);
+	puts_(" fault ");
+	puthex(gr(0xb1a), 8);
+	putc_('\n');
+	return ok;
+}
+
+static void copy_bytes(uintptr_t dst, const unsigned char *src, uint32_t n)
+{
+	for (uint32_t i = 0; i < n; i++)
+		*(volatile unsigned char *)(dst + i) = src[i];
+}
+
+static void gpu_cp_probe(void)
+{
+	delay_ms(4000);			/* power probe output stays readable for a moment */
+	con_clear();
+	fg = CYAN;
+	puts_("-- GPU CP probe (GPU powered, RBBM_STATUS ok) --\n");
+	fg = WHITE;
+	uint64_t st, res = 0;
+
+	step("GPU SMMU before zap: attach-impl-defs, CB0 pass-through, SMR0/S2CR0 for SID 0");
+	reg("smmu sCR0    ", GSMMU + 0x0);
+	reg("smmu S2CR0   ", GSMMU + 0xc00);
+	{
+		/* lavender DT attach-impl-defs (arm-smmu writes them at attach) */
+		static const uint32_t impl[][2] = {
+			{0x6000, 0x2378}, {0x6060, 0x1055}, {0x678c, 0x8}, {0x6794, 0x28}, {0x6800, 0x6},
+			{0x6900, 0x3ff}, {0x6924, 0x204}, {0x6928, 0x11000}, {0x6930, 0x800}, {0x6960, 0xffffffff},
+			{0x6b64, 0x1a5551}, {0x6b68, 0x9a82a382},
+		};
+		step("w impl-defs");
+		for (unsigned i = 0; i < sizeof(impl) / sizeof(impl[0]); i++)
+			wr32(GSMMU + impl[i][0], impl[i][1]);
+	}
+	step("w CB0 (SCTLR 0, FSR, CBA2R0, CBAR0, SCTLR 0xe0)");
+	wr32(GSMMU + 0x8000, 0);
+	wr32(GSMMU + 0x8058, 0xffffffff);
+	wr32(GSMMU + 0x1800, 1);
+	wr32(GSMMU + 0x1000, 0x0001f000);
+	wr32(GSMMU + 0x8000, 0xe0);
+	/* the SMMU's own clocks (lavender DT): gcc_gpu_cfg_ahb, gcc_bimc_gfx, gcc_gpu_bimc_gfx */
+	reg("gcc gpu ahb  ", GCCB + 0x71004);
+	reg("gcc bimc gfx ", GCCB + 0x7106c);
+	reg("gcc gpu bimc ", GCCB + 0x71010);
+	reg("smmu sGFSR   ", GSMMU + 0x48);
+	reg("smmu sACR    ", GSMMU + 0x10);
+	reg("smmu sCR2    ", GSMMU + 0x8);
+	/* mainline arm-smmu-qcom.c qcom_smmu_cfg_probe() for qcom,sdm630-smmu-v2:
+	 * the hypervisor traps and emulates S2CR; Linux first writes the LAST
+	 * group's S2CR as BYPASS and reads it back (bypass quirk detection). */
+	{
+		uint32_t last = (rd32(GSMMU + 0x20) & 0xff) - 1;
+		puts_("last S2CR index ");
+		putdec(last);
+		putc_('\n');
+		step("w S2CR[last] = BYPASS (mainline probe)");
+		wr32(GSMMU + 0xc00 + 4 * last, (1u << 16) | 0xffu);
+		reg("S2CR[last]   ", GSMMU + 0xc00 + 4 * last);
+		step("w SMR[last] = valid SID 0 mask 0");
+		wr32(GSMMU + 0x800 + 4 * last, (1u << 31));
+		reg("SMR[last]    ", GSMMU + 0x800 + 4 * last);
+		/* bypass quirk (BYPASS reads back as FAULT): like mainline, translate
+		 * through a context bank that does not translate (CB0, SCTLR.M=0) */
+		/* downstream arm_smmu_write_s2cr(): TRANS | CBNDX | SHCFG_NSH (3 << 8); 0 alone hung */
+		step("w S2CR[last] = TRANS, CB0, SHCFG NSH (0x300)");
+		wr32(GSMMU + 0xc00 + 4 * last, 0x300u);
+		reg("S2CR[last]   ", GSMMU + 0xc00 + 4 * last);
+	}
+	reg("smmu S2CR0   ", GSMMU + 0xc00);
+	reg("smmu SMR0    ", GSMMU + 0x800);
+	reg("cb0 SCTLR    ", GSMMU + 0x8000);
+
+	step("zap: PIL init_image / mem_setup / auth_reset (PAS 13)");
+	for (uint32_t i = 0; i < 0x2000; i += 4)
+		*(volatile uint32_t *)(ZAP_PA + i) = 0;
+	copy_bytes(META_PA, fw_zap_mdt, sizeof(fw_zap_mdt));
+	__asm__ volatile("dsb sy" ::: "memory");
+	st = scm6(SCM_PIL(0x06), 1, 13, 0, 0, &res);
+	st_line("shutdown  ", st, res);
+	st = scm6(SCM_PIL(0x01), 2 | (2 << 6), 13, META_PA, 0, &res);
+	st_line("init_image", st, res);
+	st = scm6(SCM_PIL(0x02), 3, 13, ZAP_PA, 0x2000, &res);
+	st_line("mem_setup ", st, res);
+	copy_bytes(ZAP_PA, fw_zap_b02, sizeof(fw_zap_b02));	/* segment paddr 0x5000 = region start */
+	__asm__ volatile("dsb sy" ::: "memory");
+	st = scm6(SCM_PIL(0x05), 1, 13, 0, 0, &res);
+	st_line("auth_reset", st, res);
+
+	step("a5xx init (Linux a5xx_hw_init, no hwcg/protect)");
+	gw(0x3049, 3);
+	gw(0x302a, 9);
+	gw(0x46f, 0xffffffff);
+	gw(0x93, 1);
+	gw(0x464, 1);
+	gw(0xe96, 2);
+	gw(0xe89, 0xfffff000); gw(0xe8a, 0x0001ffff);
+	gw(0xe87, 0xfffff000); gw(0xe88, 0x0001ffff);
+	gw(0xe8b, 0x00100000); gw(0xe8c, 0);
+	gw(0xe8d, 0x00100000 + 0x44000 - 1); gw(0xe8e, 0);
+	gw(0x825, 0x40);
+	gw(0x826, 0x400);
+	gw(0x820, 0x80000060);
+	gw(0x81f, 0x40201b16);
+	gw(0xd00, (0x200u << 11) | (0x200u << 22));
+	gw(0xcc4, gr(0xcc4) | (1u << 9));
+	gw(0xe81, 1u << 29);
+	gw(0x833, 0x02000000);
+	gw(0x94, 0xa6ffffff);
+	gw(0x95, 0x3f);
+	gw(0xf02, 1u << 7);
+	gw(0xcc6, 1u << 1);
+	gw(0xe8f, 1);
+	gw(0xe60, gr(0xe60) | (1u << 10));
+	gw(0x8a0, 0);
+	gw(0xf803, 0);
+	gw(0xf800, 0); gw(0xf801, 0);
+	gw(0xf802, 0);
+	gw(0x860, 1); gw(0xbc1, 1); gw(0xc81, 1); gw(0xcc5, 1); gw(0xd01, 1); gw(0xe05, 1);
+	gw(0xe41, 1); gw(0xe61, 1); gw(0xe80, 1); gw(0xec1, 1); gw(0xf01, 1); gw(0xf810, 1);
+	gw(0x38, 0);
+
+	step("microcode PM4/PFP, ringbuffer, start CP");
+	copy_bytes(PM4_PA, fw_pm4 + 4, sizeof(fw_pm4) - 4);
+	copy_bytes(PFP_PA, fw_pfp + 4, sizeof(fw_pfp) - 4);
+	for (uint32_t i = 0; i < 0x8000; i += 4)
+		*(volatile uint32_t *)(RING_PA + i) = 0;
+	*(volatile uint32_t *)SCRATCH_PA = 0x11111111;
+	__asm__ volatile("dsb sy" ::: "memory");
+	gw(0x838, (uint32_t)PM4_PA); gw(0x839, 0);
+	gw(0x835, (uint32_t)PFP_PA); gw(0x836, 0);
+	gw(0x800, (uint32_t)RING_PA); gw(0x801, 0);
+	gw(0x802, 12u | (2u << 8) | (1u << 27));
+	rb_w = 0;
+	gw(0x807, 0);
+	gw(0x832, 0);			/* CP_PFP_ME_CNTL: clear ME_HALT */
+
+	emit(pkt7(0x48, 8));		/* CP_ME_INIT */
+	emit(0x2f);
+	emit(3);
+	emit(0x20000000);
+	emit(0);
+	emit(0);
+	emit(0);
+	emit(0);
+	emit(0);
+	if (!kick_wait("ME_INIT"))
+		goto out;
+	emit(pkt7(0x66, 1));		/* CP_SET_SECURE_MODE 0 */
+	emit(0);
+	kick_wait("SECURE 0");
+	reg("SECVID_TRUST ", GPUREG(0xf400));
+	emit(pkt7(0x3d, 3));		/* CP_MEM_WRITE */
+	emit((uint32_t)SCRATCH_PA);
+	emit(0);
+	emit(0xc0ffee42);
+	kick_wait("MEM_WRITE");
+	for (int i = 0; i < 1000000 && *(volatile uint32_t *)SCRATCH_PA != 0xc0ffee42; i++)
+		;
+	reg("scratch      ", SCRATCH_PA);
+	if (*(volatile uint32_t *)SCRATCH_PA == 0xc0ffee42) {
+		fg = GREEN;
+		puts_("GPU EXECUTED COMMANDS\n");
+		fg = WHITE;
+	}
+out:
+	return;
+}
+#endif
+
 static void gpu_probe(void)
 {
 	fg = CYAN;
@@ -894,6 +1157,10 @@ static void gpu_probe(void)
 	reg("SECVID_TRUST ", GPUREG(0xf400));
 	fg = GREEN;
 	puts_("GPU answered\n");
+	fg = WHITE;
+#if defined(HAVE_GPUFW)
+	gpu_cp_probe();
+#endif
 park:
 	fg = GREEN;
 	puts_("GPU PROBE ONLY: photo, then POWER + VOL DOWN\n");
@@ -1177,6 +1444,12 @@ static void __attribute__((noreturn)) gold_main(void)
 		/* clock probes v6-v12 (dump/shim-probe-v6-12.md); park forever, so off */
 		if (0)
 			gold_clock_tune();
+		if (GPU_PROBE_ON_GOLD) {
+			struct mmu_info gm;
+			int mr = mmu_enable(&gm);
+			puts_(mr ? "gold MMU enable FAILED\n" : "gold: MMU on (16K, Device identity map)\n");
+			gpu_probe();
+		}
 		boot_xnu(pl);
 	}
 
@@ -1313,7 +1586,7 @@ void shim_main(const unsigned char *dtb, uintptr_t load)
 			mdp_probe();
 		if (0)
 			gpu_probe();
-		if (pl && pl->virt_base >= 0xfffffff000000000UL) {
+		if (pl && pl->virt_base >= 0xfffffff000000000UL && !GPU_PROBE_ON_GOLD) {
 			fg = CYAN;
 			puts_("\n== SILVER: 4K payload found, booting XNU ==\n");
 			fg = WHITE;
