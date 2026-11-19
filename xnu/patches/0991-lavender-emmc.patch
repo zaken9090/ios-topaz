@@ -5,7 +5,7 @@ CI run 44412839094). Only the hardware layer changes; read-only unless ufsrw=1.
 The topaz touch/keys drivers now need sweethw=1 (SM6225 MMIO).
 
 diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
-index 143db60..275e939 100644
+index 143db60..47c4445 100644
 --- a/bsd/dev/sweet_ufs.c
 +++ b/bsd/dev/sweet_ufs.c
 @@ -1,4 +1,14 @@
@@ -124,10 +124,17 @@ index 143db60..275e939 100644
  	uint8_t lun;
  	uint8_t tag;
  	uint64_t first_block, nblocks;          /* partition, in 4 KiB device blocks */
-@@ -129,146 +145,185 @@ ufs_wr(uint32_t off, uint32_t v)
+@@ -129,146 +145,198 @@ ufs_wr(uint32_t off, uint32_t v)
  	*(volatile uint32_t *)(su.regs + off) = v;
  }
  
++/* 16-bit register writes, as Linux sdhci does for block size/count, transfer mode, command */
++static inline void
++ufs_wr16(uint32_t off, uint16_t v)
++{
++	*(volatile uint16_t *)(su.regs + off) = v;
++}
++
 +static uint64_t
 +sd_deadline(void)
 +{
@@ -206,8 +213,7 @@ index 143db60..275e939 100644
   */
  static int
 -ufs_scsi(const uint8_t *cdb, unsigned cdb_len, uint32_t len, bool write)
-+sd_cmd(uint32_t idx, uint32_t arg, uint32_t flags, uint32_t blocks, bool write)
- {
+-{
 -	struct utrd *utrd = (struct utrd *)(su.dma + DMA_UTRL);
 -	struct ucd *ucd = (struct ucd *)(su.dma + DMA_UCD);
 -	uint64_t ucd_pa = su.dma_pa + DMA_UCD, bounce_pa = su.dma_pa + DMA_BOUNCE;
@@ -250,6 +256,8 @@ index 143db60..275e939 100644
 -		if (len) {
 -			dma_clean(DMA_UCD + offsetof(struct ucd, prdt),
 -			    (utrd->prdt & 0xffff) * sizeof(ucd->prdt[0]));
++sd_cmd(uint32_t idx, uint32_t arg, uint32_t flags, uint32_t blocks, bool write)
++{
 +	uint64_t deadline = sd_deadline();
 +	uint32_t s = 0;
 +	int error = 0;
@@ -297,11 +305,17 @@ index 143db60..275e939 100644
 +	if (blocks) {
 +		flags |= CF_DATA;
 +		mode = TM_BLKCNT | (write ? 0 : TM_READ) | (blocks > 1 ? TM_MULTI | TM_ACMD12 : 0);
-+		ufs_wr(SD_BLKSIZE, blocks << 16 | UFS_BLOCK);
++		ufs_wr16(SD_BLKSIZE, UFS_BLOCK);
++		ufs_wr16(SD_BLKSIZE + 2, (uint16_t)blocks);
 +	}
 +	ufs_wr(SD_ARG, arg);
-+	/* transfer mode and command in one 32-bit write: the command write starts it */
-+	ufs_wr(SD_CMD, (idx << 8 | flags) << 16 | mode);
++	/*
++	 * Transfer mode, then the command (the command write starts it). lavender
++	 * phone test 3: one 32-bit write here read back as command index 0, so
++	 * these are two 16-bit writes like Linux sdhci.
++	 */
++	ufs_wr16(SD_CMD, (uint16_t)mode);
++	ufs_wr16(SD_CMD + 2, (uint16_t)(idx << 8 | flags));
 +
 +	/*
 +	 * lavender (phone test 2): CMD inhibit stayed set and no status bit came
@@ -322,7 +336,13 @@ index 143db60..275e939 100644
 +		if (mach_absolute_time() > deadline) {
 +			error = ETIMEDOUT;
 +			break;
-+		}
+ 		}
+-		if (sleepable && now >= spin_until) {
+-			uint64_t wake = now + MIN(sleep_interval, deadline - now);
+-			/* Keep the mutex: slot 0 and the bounce buffer are still owned. */
+-			if (assert_wait_deadline_with_leeway((event_t)&su.wait, THREAD_UNINT,
+-			    TIMEOUT_URGENCY_SYS_CRITICAL, wake, 0) == THREAD_WAITING) {
+-				thread_block(THREAD_CONTINUE_NULL);
 +		delay(1);
 +	}
 +	if (!error) {
@@ -339,13 +359,7 @@ index 143db60..275e939 100644
 +		    write ? PRES_BUF_WR : PRES_BUF_RD, deadline, &s);
 +		if (error) {
 +			break;
- 		}
--		if (sleepable && now >= spin_until) {
--			uint64_t wake = now + MIN(sleep_interval, deadline - now);
--			/* Keep the mutex: slot 0 and the bounce buffer are still owned. */
--			if (assert_wait_deadline_with_leeway((event_t)&su.wait, THREAD_UNINT,
--			    TIMEOUT_URGENCY_SYS_CRITICAL, wake, 0) == THREAD_WAITING) {
--				thread_block(THREAD_CONTINUE_NULL);
++		}
 +		ufs_wr(SD_INT_STATUS, write ? INT_BUF_WR : INT_BUF_RD);
 +		uint32_t *p = buf + b * (UFS_BLOCK / 4);
 +		if (write) {
@@ -421,7 +435,7 @@ index 143db60..275e939 100644
  }
  
  /*
-@@ -294,19 +349,18 @@ ufs_write_blocks(uint64_t lba, uint32_t count)
+@@ -294,19 +362,18 @@ ufs_write_blocks(uint64_t lba, uint32_t count)
  		printf("SWEET UFS: refusing write of %u blocks at 0x%llx\n", count, lba);
  		return EPERM;
  	}
@@ -448,7 +462,7 @@ index 143db60..275e939 100644
  }
  
  static int
-@@ -475,34 +529,46 @@ sweet_ufs_read_part(const char *want, uint64_t off, void *dst, uint64_t len)
+@@ -475,34 +542,46 @@ sweet_ufs_read_part(const char *want, uint64_t off, void *dst, uint64_t len)
  static int
  ufs_take_over_host(void)
  {
@@ -460,25 +474,25 @@ index 143db60..275e939 100644
 +	    ufs_rd(SD_CAP), pres, clk, ufs_rd(SD_INT_ENABLE));
 +	if (!(clk & CLK_SD_EN)) {
 +		printf("SWEET EMMC: card clock is off: ABL left no usable host\n");
-+		return ENXIO;
-+	}
-+	if (su.cq && (*(volatile uint32_t *)(su.cq + CQ_CFG) & 1)) {
-+		printf("SWEET EMMC: command queue engine enabled (CQCFG 0x%x): not supported\n",
-+		    *(volatile uint32_t *)(su.cq + CQ_CFG));
  		return ENXIO;
  	}
 -	if (ufs_rd(REG_UTRLDBR)) {
 -		printf("SWEET UFS: requests outstanding from the bootloader\n");
 -		return EBUSY;
-+	ufs_wr(SD_INT_SIGNAL, 0);               /* polled operation */
-+	ufs_wr(SD_INT_ENABLE, INT_ENABLE_ALL);
-+	if (pres & (PRES_CMD_INHIBIT | PRES_DAT_INHIBIT)) {
-+		sd_reset_lines();
++	if (su.cq && (*(volatile uint32_t *)(su.cq + CQ_CFG) & 1)) {
++		printf("SWEET EMMC: command queue engine enabled (CQCFG 0x%x): not supported\n",
++		    *(volatile uint32_t *)(su.cq + CQ_CFG));
++		return ENXIO;
  	}
 -	/* With RAM above 4 GiB (mkadt.py --highmem) the DMA memory can be there too. */
 -	if (((su.dma_pa + DMA_SIZE - 1) >> 32) && !(ufs_rd(REG_CAP) & CAP_64AS)) {
 -		printf("SWEET UFS: DMA memory at 0x%llx but the host has no 64-bit addressing\n",
 -		    su.dma_pa);
++	ufs_wr(SD_INT_SIGNAL, 0);               /* polled operation */
++	ufs_wr(SD_INT_ENABLE, INT_ENABLE_ALL);
++	if (pres & (PRES_CMD_INHIBIT | PRES_DAT_INHIBIT)) {
++		sd_reset_lines();
++	}
 +	ufs_wr(SD_INT_STATUS, 0xffffffffu);
 +	printf("SWEET EMMC: int enable now 0x%x, int status 0x%x\n",
 +	    ufs_rd(SD_INT_ENABLE), ufs_rd(SD_INT_STATUS));
@@ -517,7 +531,7 @@ index 143db60..275e939 100644
  	return 0;
  }
  
-@@ -761,6 +827,8 @@ sweet_ufs_init(void)
+@@ -761,6 +840,8 @@ sweet_ufs_init(void)
  	su.wait = (wait == 1);
  
  	su.regs = ml_io_map(reg[0], reg[1]);
@@ -526,7 +540,7 @@ index 143db60..275e939 100644
  	if (kmem_alloc_contig(kernel_map, &su.dma, DMA_SIZE, PAGE_MASK, 0, 0,
  	    KMA_DATA | KMA_ZERO | KMA_PERMANENT, VM_KERN_MEMORY_IOKIT) != KERN_SUCCESS) {
  		printf("SWEET UFS: no contiguous DMA memory\n");
-@@ -776,12 +844,6 @@ sweet_ufs_init(void)
+@@ -776,12 +857,6 @@ sweet_ufs_init(void)
  
  	lck_mtx_lock(&sweet_ufs_lock);
  	error = ufs_take_over_host();
@@ -539,7 +553,7 @@ index 143db60..275e939 100644
  	if (!error) {
  		error = ufs_find_partition(want);
  	}
-@@ -804,7 +866,7 @@ sweet_ufs_init(void)
+@@ -804,7 +879,7 @@ sweet_ufs_init(void)
  	/* Only now, with the partition bounds known, can writes be allowed. */
  	su.writable = (rw != 0);
  	su.ready = true;
@@ -548,7 +562,7 @@ index 143db60..275e939 100644
  	    want, su.lun, su.first_block, su.nblocks * UFS_BLOCK >> 20,
  	    su.writable ? "read-write" : "read-only", su.dma_pa);
  	sweet_log_start();
-@@ -821,9 +883,10 @@ sweet_ufs_init(void)
+@@ -821,9 +896,10 @@ sweet_ufs_init(void)
  	 */
  	int hw = 0;
  	(void)PE_parse_boot_argn("sweethw", &hw, sizeof(hw));

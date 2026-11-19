@@ -108,6 +108,13 @@ ufs_wr(uint32_t off, uint32_t v)
 	*(volatile uint32_t *)(su.regs + off) = v;
 }
 
+/* 16-bit register writes, as Linux sdhci does for block size/count, transfer mode, command */
+static inline void
+ufs_wr16(uint32_t off, uint16_t v)
+{
+	*(volatile uint16_t *)(su.regs + off) = v;
+}
+
 static uint64_t
 sd_deadline(void)
 {
@@ -198,11 +205,17 @@ sd_cmd(uint32_t idx, uint32_t arg, uint32_t flags, uint32_t blocks, bool write)
 	if (blocks) {
 		flags |= CF_DATA;
 		mode = TM_BLKCNT | (write ? 0 : TM_READ) | (blocks > 1 ? TM_MULTI | TM_ACMD12 : 0);
-		ufs_wr(SD_BLKSIZE, blocks << 16 | UFS_BLOCK);
+		ufs_wr16(SD_BLKSIZE, UFS_BLOCK);
+		ufs_wr16(SD_BLKSIZE + 2, (uint16_t)blocks);
 	}
 	ufs_wr(SD_ARG, arg);
-	/* transfer mode and command in one 32-bit write: the command write starts it */
-	ufs_wr(SD_CMD, (idx << 8 | flags) << 16 | mode);
+	/*
+	 * Transfer mode, then the command (the command write starts it). lavender
+	 * phone test 3: one 32-bit write here read back as command index 0, so
+	 * these are two 16-bit writes like Linux sdhci.
+	 */
+	ufs_wr16(SD_CMD, (uint16_t)mode);
+	ufs_wr16(SD_CMD + 2, (uint16_t)(idx << 8 | flags));
 
 	/*
 	 * lavender (phone test 2): CMD inhibit stayed set and no status bit came
