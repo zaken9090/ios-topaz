@@ -1,0 +1,67 @@
+name: userland
+
+# lavender: the GPU user space for iOS 16 (arm64, iphoneos SDK) on a macOS runner:
+# Mesa 25.0.7 (softpipe + freedreno over redwood-drm, userland/mesa) as
+# libOSMesa.8.dylib, the EAGL stand-in (userland/gpu/eagl.c + gl_osmesa.c) as
+# libtopaz-gl.dylib and the backboardd loader (topaz_inject.c) as
+# libtopaz-inject.dylib, all under /topaz/lib on the iOS root.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [lavender]
+    paths:
+      - "userland/**"
+      - ".github/workflows/userland.yml"
+
+concurrency:
+  group: userland-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Deps
+        run: |
+          brew install meson ninja bison
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-path
+
+      - name: Mesa (freedreno + softpipe, OSMesa)
+        working-directory: userland
+        run: |
+          # mk-mesa-mac.sh expects to sit next to mesa/ (its patches and redwood-drm)
+          cp mesa/mk-mesa-mac.sh .
+          mkdir -p build-mesa
+          bash -x mk-mesa-mac.sh || { tail -60 build-mesa/meson-setup.log build-mesa/ninja.log 2>/dev/null; exit 1; }
+          ls -la build-mesa/out
+
+      - name: EAGL library and loader
+        working-directory: userland
+        run: |
+          set -e
+          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          CC="$(xcrun --sdk iphoneos -f clang) -target arm64-apple-ios16.0 -isysroot $SDK -O1"
+          M=build-mesa/out
+          mkdir -p out
+          python3 gpu/mkeagl.py gpu/eagl_slots.txt $M/gl.xml $M/exported-gl.txt gpu/eagl.c > gpu/eagl_gen.h
+          $CC -dynamiclib -install_name /topaz/lib/libtopaz-gl.dylib -Igpu \
+            -framework CoreFoundation -framework IOKit -framework IOSurface -lobjc \
+            $M/libOSMesa.8.dylib -o out/libtopaz-gl.dylib gpu/eagl.c gpu/gl_osmesa.c
+          $CC -dynamiclib -install_name /topaz/lib/libtopaz-inject.dylib \
+            -framework CoreFoundation -framework IOKit -lobjc \
+            -o out/libtopaz-inject.dylib gpu/topaz_inject.c
+          cp $M/libOSMesa.8.dylib out/
+          for f in out/*.dylib; do codesign -s - -f "$f"; done
+          ls -la out
+          otool -L out/libtopaz-gl.dylib
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: topaz-userland
+          path: userland/out/
+          retention-days: 14
