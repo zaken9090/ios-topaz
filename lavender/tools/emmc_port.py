@@ -153,16 +153,13 @@ sd_dump_once(const char *why)
 		return;
 	}
 	dumped = true;
-	printf("SWEET EMMC: regs after %s:
-", why);
+	printf("SWEET EMMC: regs after %s:\\n", why);
 	for (uint32_t off = 0; off < 0x80; off += 0x20) {
-		printf("SWEET EMMC: %02x: %08x %08x %08x %08x %08x %08x %08x %08x
-", off,
+		printf("SWEET EMMC: %02x: %08x %08x %08x %08x %08x %08x %08x %08x\\n", off,
 		    ufs_rd(off), ufs_rd(off + 4), ufs_rd(off + 8), ufs_rd(off + 12),
 		    ufs_rd(off + 16), ufs_rd(off + 20), ufs_rd(off + 24), ufs_rd(off + 28));
 	}
-	printf("SWEET EMMC: int status as 16-bit: normal %04x error %04x
-",
+	printf("SWEET EMMC: int status as 16-bit: normal %04x error %04x\\n",
 	    *(volatile uint16_t *)(su.regs + SD_INT_STATUS), *(volatile uint16_t *)(su.regs + SD_INT_STATUS + 2));
 }
 
@@ -264,8 +261,7 @@ sd_cmd(uint32_t idx, uint32_t arg, uint32_t flags, uint32_t blocks, bool write)
 		/* the controller never closed the command: reset the CMD line only */
 		static unsigned stuck;
 		if (stuck++ < 3) {
-			printf("SWEET EMMC: CMD%u done but CMD inhibit stuck (present 0x%x): CMD line reset
-",
+			printf("SWEET EMMC: CMD%u done but CMD inhibit stuck (present 0x%x): CMD line reset\\n",
 			    idx, ufs_rd(SD_PRESENT));
 		}
 		ufs_wr(SD_CLOCK, ufs_rd(SD_CLOCK) | RST_CMD);
