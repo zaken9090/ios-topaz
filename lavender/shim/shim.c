@@ -1046,6 +1046,42 @@ out:
 }
 #endif
 
+#if defined(HAVE_GPUFW)
+/* GPU firmware block for the kernel (TopazAdreno.cpp fw_get): "LVGPUFW1", count, { name[24], offset, size } */
+#define LV_FW_PA	0xbf000000UL
+static void lv_put_entry(int i, const char *name, uint32_t off, const unsigned char *src, uint32_t len)
+{
+	volatile unsigned char *e = (volatile unsigned char *)(LV_FW_PA + 16 + 32 * (uintptr_t)i);
+	for (int k = 0; k < 24; k++)
+		e[k] = 0;
+	for (int k = 0; k < 23 && name[k]; k++)
+		e[k] = (unsigned char)name[k];
+	*(volatile uint32_t *)(e + 24) = off;
+	*(volatile uint32_t *)(e + 28) = len;
+	copy_bytes(LV_FW_PA + off, src, len);
+}
+
+static void lv_fw_block(void)
+{
+	volatile unsigned char *b = (volatile unsigned char *)LV_FW_PA;
+	uint32_t off = 0x1000;
+	lv_put_entry(0, "a512_zap.mdt", off, fw_zap_mdt, sizeof(fw_zap_mdt));
+	off += (sizeof(fw_zap_mdt) + 0xfff) & ~0xfffu;
+	lv_put_entry(1, "a512_zap.b02", off, fw_zap_b02, sizeof(fw_zap_b02));
+	off += (sizeof(fw_zap_b02) + 0xfff) & ~0xfffu;
+	lv_put_entry(2, "a530_pm4.fw", off, fw_pm4, sizeof(fw_pm4));
+	off += (sizeof(fw_pm4) + 0xfff) & ~0xfffu;
+	lv_put_entry(3, "a530_pfp.fw", off, fw_pfp, sizeof(fw_pfp));
+	*(volatile uint32_t *)(b + 8) = 4;
+	*(volatile uint32_t *)(b + 12) = 0;
+	const char *magic = "LVGPUFW1";
+	for (int k = 0; k < 8; k++)
+		b[k] = (unsigned char)magic[k];
+	__asm__ volatile("dsb sy" ::: "memory");
+	puts_("GPU firmware block at 0xbf000000 (4 files)\n");
+}
+#endif
+
 static void gpu_probe(void)
 {
 	fg = CYAN;
@@ -1418,6 +1454,9 @@ static void __attribute__((noreturn)) boot_xnu(const struct payload *p)
 	kv("boot_args     ", ba_pa, 9);
 	kv("top           ", top, 9);
 
+#if defined(HAVE_GPUFW)
+	lv_fw_block();
+#endif
 	gic_prepare_for_xnu();
 	uintptr_t entry_pa = p->entry_va + pa_of_va_base;
 	kv("JUMP          ", entry_pa, 9);
