@@ -16,3 +16,10 @@ Verified on the device (all via `fastboot boot`, nothing flashed):
 ABL accepts header v1 + Image.gz + the real lavender DTB (msm-id 317, board-id 0x20008);
 framebuffer 0x9d400000 1080x2340 stride 4320; Silver→Gold hand-off; 16K MMU on Gold;
 shim loader runs a test payload at PA 0x100004000.
+
+Status 2026-11-19: iOS 16.7.16 boots from eMMC to the lock screen and home screen on the
+Silver cores (TOPAZ_4K), touch works, and **CoreAnimation draws on the Adreno 512**
+(patch 0996 kernel driver + userland Mesa freedreno / libtopaz-gl / libtopaz-inject;
+boot-args `gpu=1 topaz_inject=/topaz/lib/libtopaz-inject.dylib,backboardd`). Patch 0997
+adds `gpudiag=3` (console log lines shown on screen page by page). Note: the first boot after
+flashing a fresh root takes 15-25 minutes (LaunchServices seeding) and must not be interrupted.
