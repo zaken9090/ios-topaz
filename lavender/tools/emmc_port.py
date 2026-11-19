@@ -58,6 +58,8 @@ src = cut(src, "#define REG_CAP ", "static struct {\n", """#define SD_BLKSIZE   
 
 #define PRES_CMD_INHIBIT        (1u << 0)
 #define PRES_DAT_INHIBIT        (1u << 1)
+#define PRES_BUF_WR             (1u << 10)
+#define PRES_BUF_RD             (1u << 11)
 #define CLK_SD_EN               (1u << 2)
 #define RST_CMD                 (1u << 25)
 #define RST_DAT                 (1u << 26)
@@ -114,9 +116,15 @@ sd_deadline(void)
 	return d + mach_absolute_time();
 }
 
-/* Wait for any of the bits in want; 0, or EIO on an error status, ETIMEDOUT. */
+/*
+ * Wait for any of the interrupt status bits in want, or for the present state
+ * bits in pmask to read as pval. lavender (2026-11-19, first phone test): the
+ * interrupt status stayed 0 while the present state showed the data in the
+ * buffer, so the present state is what the driver relies on; error status bits
+ * still fail the command. 0, EIO on an error status, or ETIMEDOUT.
+ */
 static int
-sd_wait(uint32_t want, uint64_t deadline, uint32_t *status)
+sd_wait(uint32_t want, uint32_t pmask, uint32_t pval, uint64_t deadline, uint32_t *status)
 {
 	for (;;) {
 		uint32_t s = ufs_rd(SD_INT_STATUS);
@@ -124,7 +132,7 @@ sd_wait(uint32_t want, uint64_t deadline, uint32_t *status)
 			*status = s;
 			return EIO;
 		}
-		if (s & want) {
+		if ((s & want) || (pmask && (ufs_rd(SD_PRESENT) & pmask) == pval)) {
 			*status = s;
 			return 0;
 		}
@@ -177,7 +185,7 @@ sd_cmd(uint32_t idx, uint32_t arg, uint32_t flags, uint32_t blocks, bool write)
 	/* transfer mode and command in one 32-bit write: the command write starts it */
 	ufs_wr(SD_CMD, (idx << 8 | flags) << 16 | mode);
 
-	error = sd_wait(INT_CMD_DONE, deadline, &s);
+	error = sd_wait(INT_CMD_DONE, PRES_CMD_INHIBIT, 0, deadline, &s);
 	if (!error) {
 		ufs_wr(SD_INT_STATUS, INT_CMD_DONE);
 		uint32_t r1 = ufs_rd(SD_RESP0);
@@ -188,7 +196,8 @@ sd_cmd(uint32_t idx, uint32_t arg, uint32_t flags, uint32_t blocks, bool write)
 	}
 	uint32_t *buf = (uint32_t *)(su.dma + DMA_BOUNCE);
 	for (uint32_t b = 0; !error && b < blocks; b++) {
-		error = sd_wait(write ? INT_BUF_WR : INT_BUF_RD, deadline, &s);
+		error = sd_wait(write ? INT_BUF_WR : INT_BUF_RD, write ? PRES_BUF_WR : PRES_BUF_RD,
+		    write ? PRES_BUF_WR : PRES_BUF_RD, deadline, &s);
 		if (error) {
 			break;
 		}
@@ -205,7 +214,7 @@ sd_cmd(uint32_t idx, uint32_t arg, uint32_t flags, uint32_t blocks, bool write)
 		}
 	}
 	if (!error && (blocks || flags == CF_R1B)) {
-		error = sd_wait(INT_XFER_DONE, deadline, &s);
+		error = sd_wait(INT_XFER_DONE, PRES_DAT_INHIBIT, 0, deadline, &s);
 	}
 	ufs_wr(SD_INT_STATUS, 0xffffffffu);
 	if (error) {
@@ -268,6 +277,8 @@ ufs_take_over_host(void)
 		sd_reset_lines();
 	}
 	ufs_wr(SD_INT_STATUS, 0xffffffffu);
+	printf("SWEET EMMC: int enable now 0x%x, int status 0x%x\\n",
+	    ufs_rd(SD_INT_ENABLE), ufs_rd(SD_INT_STATUS));
 
 	/* CMD8 SEND_EXT_CSD: proves the card answers, and which area is selected. */
 	int error = sd_cmd(8, 0, CF_R1, 1, false);
