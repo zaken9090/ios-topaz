@@ -755,6 +755,153 @@ park:
 		__asm__ volatile("wfe");
 }
 
+/*
+ * GPU power probe (no XNU): SDM660 Adreno 512. GCC GPU branches, GPUCC GDSCs
+ * (CX 0x5066004, GX 0x5066094 with clamp 0x5065130 and BCR 0x5066090),
+ * gfx3d RCG 0x5066070 from GPLL0 (src 5), branches gfx3d 0x5066098 and
+ * rbbmtimer 0x50660d0, then read RBBM_STATUS (reg 0x4f5) at 0x5000000.
+ * Values from mainline gpucc-sdm660.c / gcc-sdm660.c; a hang shows the step.
+ */
+#define GCCB		0x00100000UL
+#define GPUCC		0x05065000UL
+#define GPUREG(r)	(0x05000000UL + 4UL * (r))
+
+static void step(const char *what)
+{
+	puts_(what);
+	puts_(" ...\n");
+	delay_ms(300);
+}
+
+static int poll_set(uintptr_t a, uint32_t mask, int want_set)
+{
+	for (int i = 0; i < 100000; i++) {
+		uint32_t v = rd32(a);
+		if (want_set ? (v & mask) : !(v & mask))
+			return 1;
+	}
+	return 0;
+}
+
+static void gpu_probe(void)
+{
+	fg = CYAN;
+	puts_("\n-- GPU power probe (Adreno 512) --\n");
+	fg = WHITE;
+	reg("gcc gpu ahb  ", GCCB + 0x71004);
+	reg("gcc gpu bimc ", GCCB + 0x71010);
+	reg("gcc bimc gfx ", GCCB + 0x7106c);
+	reg("gcc gpll0 gpu", GCCB + 0x5200c);
+	reg("gpucc cxo    ", GPUCC + 0x1020);
+	reg("gdsc cx      ", GPUCC + 0x1004);
+	reg("gdsc gx      ", GPUCC + 0x1094);
+	reg("gx clamp     ", GPUCC + 0x130);
+	reg("gfx3d rcg    ", GPUCC + 0x1070);
+	reg("gfx3d cfg    ", GPUCC + 0x1074);
+	reg("gfx3d cbcr   ", GPUCC + 0x1098);
+	reg("pll0 mode    ", GPUCC + 0x0);
+
+	step("gcc: gpu ahb, bimc, gpll0 branches on");
+	wr32(GCCB + 0x71004, rd32(GCCB + 0x71004) | 1);
+	wr32(GCCB + 0x71010, rd32(GCCB + 0x71010) | 1);
+	wr32(GCCB + 0x7106c, rd32(GCCB + 0x7106c) | 1);
+	wr32(GCCB + 0x5200c, rd32(GCCB + 0x5200c) | (1u << 4) | (1u << 3));
+	delay_ms(5);
+	reg("gcc gpu ahb  ", GCCB + 0x71004);
+	reg("gcc gpu bimc ", GCCB + 0x71010);
+
+	step("gdsc cx on");
+	wr32(GPUCC + 0x1004, rd32(GPUCC + 0x1004) & ~1u);
+	puts_(poll_set(GPUCC + 0x1004, 1u << 31, 1) ? "cx PWR_ON\n" : "cx TIMEOUT\n");
+	reg("gdsc cx      ", GPUCC + 0x1004);
+
+	/* msm_gfx_ldo.c enable_bhs_mode(): GX powered from CX through the BHS switch */
+#define GFXLDO 0x0506e000UL
+	reg("ldo pwrsw ctl", GFXLDO + 0x1c);
+	reg("ldo pwrsw st ", GFXLDO + 0x28);
+	step("gfx3d root: XO 19.2 MHz, ROOT_EN (force-enable-root-clk), branches on");
+	wr32(GPUCC + 0x1074, 0u);
+	wr32(GPUCC + 0x1070, rd32(GPUCC + 0x1070) | 2u | 1u);
+	puts_(poll_set(GPUCC + 0x1070, 1, 0) ? "rcg updated\n" : "rcg TIMEOUT\n");
+	wr32(GPUCC + 0x1098, rd32(GPUCC + 0x1098) | 1);
+	wr32(GPUCC + 0x10d0, rd32(GPUCC + 0x10d0) | 1);
+	reg("gfx3d rcg    ", GPUCC + 0x1070);
+	reg("gfx3d cbcr   ", GPUCC + 0x1098);
+
+	step("gfx ldo init: clamp off, CPR auto-bypass, sdm660 config");
+	wr32(GFXLDO + 0x1c, (rd32(GFXLDO + 0x1c) & ~(1u << 31)) | (1u << 29));
+	wr32(GFXLDO + 0x00, 0x00000080);
+	wr32(GFXLDO + 0x04, 0x0100a600);
+	wr32(GFXLDO + 0x08, 0x000000a0);
+	wr32(GFXLDO + 0x0c, 0x0000c3fe);
+	wr32(GFXLDO + 0x10, 0x00000000);
+	wr32(GFXLDO + 0x14, 0x00401100);
+	wr32(GFXLDO + 0x2c, 0x00000230);
+	wr32(GFXLDO + 0x30, 0x00000048);
+	wr32(GFXLDO + 0x34, 0x00000000);
+	reg("ldo pwrsw ctl", GFXLDO + 0x1c);
+
+	step("gfx ldo: BHS mode under GDSC control");
+	{
+		uint32_t c = rd32(GFXLDO + 0x1c);
+		c |= 1u << 4;			/* LDO_UNDER_SW_CTRL */
+		wr32(GFXLDO + 0x1c, c);
+		c &= ~(1u << 9);		/* PWR_SRC_SEL = BHS */
+		wr32(GFXLDO + 0x1c, c);
+		c &= ~(1u << 30);		/* CPR_BYPASS_IN_LDO_MODE off */
+		wr32(GFXLDO + 0x1c, c);
+		c &= ~(1u << 1);		/* BHS_EN_FEW to gdsc */
+		wr32(GFXLDO + 0x1c, c);
+		c &= ~(1u << 2);		/* BHS_EN_REST to gdsc */
+		wr32(GFXLDO + 0x1c, c);
+		c &= ~1u;			/* BHS under GDSC control */
+		wr32(GFXLDO + 0x1c, c);
+	}
+	reg("ldo pwrsw ctl", GFXLDO + 0x1c);
+	reg("ldo pwrsw st ", GFXLDO + 0x28);
+
+	/* downstream gdsc.c gdsc_enable(): domain-addr 0x5065130 with reset-aon-logic:
+	 * pulse GMEM_RESET (bit 4), then release GMEM clamp (bit 0), THEN power on */
+	step("gx domain: aon reset pulse, clamp off");
+	wr32(GPUCC + 0x130, rd32(GPUCC + 0x130) | (1u << 4));
+	delay_ms(1);
+	wr32(GPUCC + 0x130, rd32(GPUCC + 0x130) & ~(1u << 4));
+	wr32(GPUCC + 0x130, rd32(GPUCC + 0x130) & ~1u);
+	reg("gx domain    ", GPUCC + 0x130);
+
+	step("gdsc gx on");
+	wr32(GPUCC + 0x1094, rd32(GPUCC + 0x1094) & ~1u);
+	int gx = poll_set(GPUCC + 0x1094, 1u << 31, 1);
+	puts_(gx ? "gx PWR_ON\n" : "gx TIMEOUT\n");
+	reg("gdsc gx      ", GPUCC + 0x1094);
+	if (!gx)
+		goto park;
+	step("gx clamp off, gx BCR pulse");
+	wr32(GPUCC + 0x130, rd32(GPUCC + 0x130) & ~1u);
+	wr32(GPUCC + 0x1090, 1);
+	delay_ms(1);
+	wr32(GPUCC + 0x1090, 0);
+	delay_ms(1);
+
+	puts_(poll_set(GPUCC + 0x1098, 1u << 31, 0) ? "gfx3d branch ON\n" : "gfx3d branch HALTED\n");
+	reg("gfx3d cbcr   ", GPUCC + 0x1098);
+	reg("rbbmtimer    ", GPUCC + 0x10d0);
+
+	step("read GPU registers");
+	reg("RBBM_STATUS  ", GPUREG(0x4f5));
+	reg("RBBM_CLK_CNTL", GPUREG(0xaf));
+	reg("CP_PFP_ME    ", GPUREG(0x804));
+	reg("SECVID_TRUST ", GPUREG(0xf400));
+	fg = GREEN;
+	puts_("GPU answered\n");
+park:
+	fg = GREEN;
+	puts_("GPU PROBE ONLY: photo, then POWER + VOL DOWN\n");
+	fg = WHITE;
+	for (;;)
+		__asm__ volatile("wfe");
+}
+
 static void osm_probe(void)
 {
 	fg = CYAN;
@@ -1164,6 +1311,8 @@ void shim_main(const unsigned char *dtb, uintptr_t load)
 		const struct payload *pl = find_payload();
 		if (0)
 			mdp_probe();
+		if (0)
+			gpu_probe();
 		if (pl && pl->virt_base >= 0xfffffff000000000UL) {
 			fg = CYAN;
 			puts_("\n== SILVER: 4K payload found, booting XNU ==\n");
