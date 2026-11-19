@@ -466,6 +466,197 @@ static void gold_mux_to_pll(void)
 	putc_('\n');
 }
 
+/*
+ * Real Gold clock: PMU cycle counter against the 19.2 MHz timer over 20 ms.
+ * Counts core cycles, so clock dividers and pulse swallowing show up too.
+ */
+static uint64_t gold_mhz(void)
+{
+	WR(pmcr_el0, RD(pmcr_el0) | 1);          /* E */
+	WR(pmcntenset_el0, 1UL << 31);           /* cycle counter */
+	__asm__ volatile("isb");
+	uint64_t f = RD(cntfrq_el0), t0 = ticks(), c0 = RD(pmccntr_el0);
+	while (ticks() - t0 < f / 50)
+		;
+	uint64_t c1 = RD(pmccntr_el0), t1 = ticks();
+	return (c1 - c0) * (f / 1000000) / (t1 - t0 ? t1 - t0 : 1);
+}
+
+#define APCS_ITM_PRESENT	0x179d143cUL
+
+static void gold_line(const char *what)
+{
+	puts_(what);
+	puts_(": ");
+	putdec((int64_t)gold_mhz());
+	puts_(" MHz, loop ");
+	putdec((int64_t)speed_ticks());
+	puts_(" | cfg ");
+	puthex(rd32(RCGR_GOLD_CFG), 4);
+	puts_(" itm ");
+	puthex(rd32(APCS_ITM_PRESENT), 8);
+	putc_('\n');
+}
+
+/*
+ * Before XNU: measure Gold, then try (1) the APCS ITM_PRESENT perfcl bit off
+ * (clk-cpu-osm.c clears it for a cluster at OSM hand-off), (2) the Gold mux
+ * on its own PLL (614 MHz, set by XBL; v4). No PLL L or voltage changes.
+ * Keeps whatever ends up faster. Results stay on screen for 12 s.
+ */
+static void clk_regs(const char *name, uintptr_t pll, uintptr_t rcg)
+{
+	puts_(name);
+	puts_(" pll ");
+	puthex(rd32(pll), 1);
+	puts_(" L ");
+	putdec(rd32(pll + 4) & 0xff);
+	puts_(" uctl ");
+	puthex(rd32(pll + 0xc), 8);
+	puts_(" cfg ");
+	puthex(rd32(pll + 0x10), 8);
+	puts_(" dd ");
+	puthex(rd32(pll + 0x208), 8);
+	puts_(" rcg ");
+	puthex(rd32(rcg), 2);
+	putc_('/');
+	puthex(rd32(rcg + 4), 4);
+	putc_('\n');
+}
+
+static void mux_set(uint32_t cfg)
+{
+	wr32(RCGR_GOLD_CFG, cfg);
+	wr32(RCGR_GOLD_CMD, 0x3);
+	for (int n = 0; (rd32(RCGR_GOLD_CMD) & 1) && n < 100000; n++)
+		;
+	__asm__ volatile("isb");
+}
+
+/*
+ * Probe v7 (no XNU): compare the Silver cluster (runs at its PLL rate) with
+ * Gold, dump APCS common, then try Silver's PLL user_ctl (post divider) on
+ * the Gold PLL while Gold runs from GPLL0, and the mux to PLL main / early.
+ */
+static void silver_mux_set(uint32_t cfg)
+{
+	wr32(0x17911054UL, cfg);
+	wr32(0x17911050UL, 0x3);
+	for (int n = 0; (rd32(0x17911050UL) & 1) && n < 100000; n++)
+		;
+	__asm__ volatile("isb");
+}
+
+/* v8: does the Silver RCG choose Silver's clock? (Silver runs at its PLL rate with cfg 0x401) */
+static void silver_mux_test(void)
+{
+	uint32_t cfg = rd32(0x17911054UL);
+	puts_("\nsilver mux: ");
+	puthex(cfg, 4);
+	puts_(" ");
+	putdec((int64_t)gold_mhz());
+	silver_mux_set((cfg & ~0x700u) | 0x300u);
+	puts_(" | 301 ");
+	putdec((int64_t)gold_mhz());
+	silver_mux_set((cfg & ~0x700u) | 0x500u);
+	puts_(" | 501 ");
+	putdec((int64_t)gold_mhz());
+	silver_mux_set(cfg);
+	puts_(" | back ");
+	putdec((int64_t)gold_mhz());
+	puts_(" MHz\n");
+}
+
+static void osm_pair(const char *name, uint32_t off)
+{
+	puts_(name);
+	putc_(' ');
+	puthex(rd32(OSM_PWRCL + off), 8);
+	putc_(' ');
+	puthex(rd32(OSM_PERFCL + off), 8);
+	putc_(' ');
+}
+
+static void gold_pll_relock(uint32_t l)
+{
+	wr32(PLL_PERFCL + 0x0, 0x0);
+	wr32(PLL_PERFCL + 0x4, l);
+	wr32(PLL_PERFCL + 0x0, 0x2);
+	for (volatile int i = 0; i < 20000; i++)
+		;
+	wr32(PLL_PERFCL + 0x0, 0x6);
+	for (volatile int i = 0; i < 100000; i++)
+		;
+	wr32(PLL_PERFCL + 0x0, 0x7);
+	for (int n = 0; !(rd32(PLL_PERFCL + 0x2c) & (1u << 16)) && n < 100000; n++)
+		;
+}
+
+static void hexrow(const char *name, uintptr_t a, int n)
+{
+	puts_(name);
+	for (int i = 0; i < n; i++) {
+		putc_(' ');
+		puthex(rd32(a + 4 * (uintptr_t)i), 8);
+	}
+	putc_('\n');
+}
+
+/* print offsets where the Gold (0x178xxxxx) and Silver (0x179xxxxx) pages differ */
+static int diff_pages(uintptr_t gold, uintptr_t silver, uint32_t size, int budget)
+{
+	for (uint32_t o = 0; o < size && budget > 0; o += 4) {
+		uint32_t g = rd32(gold + o), sv = rd32(silver + o);
+		if (g != sv) {
+			puthex(gold + o, 8);
+			puts_(" g ");
+			puthex(g, 8);
+			puts_(" s ");
+			puthex(sv, 8);
+			putc_('\n');
+			budget--;
+		}
+	}
+	return budget;
+}
+
+static void try_reg(const char *what, uintptr_t a, uint32_t v)
+{
+	puts_(what);
+	puts_(" <- ");
+	puthex(v, 8);
+	puts_(" ...\n");
+	delay_ms(3000);
+	wr32(a, v);
+	__asm__ volatile("isb");
+	gold_line("   ");
+	delay_ms(3000);
+}
+
+/*
+ * Probe v12 (no XNU): v11 diff of the Gold vs Silver APCS clock pages.
+ * Copy Silver's values into Gold one at a time (0x...058 also 1 and 0),
+ * measuring after each. A hang shows the step that did it.
+ */
+static void gold_clock_tune(void)
+{
+	fg = CYAN;
+	puts_("\n-- gold clock probe v12c: silver values into gold --\n");
+	fg = WHITE;
+	gold_line("start");
+	try_reg("00c=6", 0x1781100cUL, 6);
+	try_reg("010=6", 0x17811010UL, 6);
+	try_reg("018  ", 0x17811018UL, rd32(0x17811018UL) & ~(1u << 16));
+	try_reg("06c  ", 0x1781106cUL, rd32(0x1781106cUL) & ~(1u << 24));
+	try_reg("028  ", 0x17811028UL, rd32(0x17811028UL) | (1u << 29));
+	try_reg("290  ", 0x17811290UL, 0xc005fe00u);
+	fg = GREEN;
+	puts_("PROBE ONLY: take a photo, then hold POWER + VOL DOWN\n");
+	fg = WHITE;
+	for (;;)
+		__asm__ volatile("wfe");
+}
+
 static void osm_probe(void)
 {
 	fg = CYAN;
@@ -555,7 +746,9 @@ static void gic_prepare_for_xnu(void)
 		;
 	kv("GICD_CTLR     ", rd32(GICD_BASE), 8);
 	uint32_t me = (uint32_t)(RD(mpidr_el1) & 0xffffff);
-	for (uint32_t aff = 0x100; aff <= 0x103; aff++) {
+	/* the boot core's cluster: gold 0x100-0x103 (16K kernel) or silver 0x0-0x3 (4K) */
+	uint32_t first = me & ~0xffU;
+	for (uint32_t aff = first; aff <= first + 3; aff++) {
 		uintptr_t r = gicr_for(aff);
 		puts_("GICR ");
 		puthex(aff, 3);
@@ -736,6 +929,9 @@ static void __attribute__((noreturn)) gold_main(void)
 		puts_("\n== GOLD: payload found, booting XNU ==\n");
 		fg = WHITE;
 		print_cpu("gold", RD(mpidr_el1), RD(midr_el1), mmfr0);
+		/* clock probes v6-v12 (dump/shim-probe-v6-12.md); park forever, so off */
+		if (0)
+			gold_clock_tune();
 		boot_xnu(pl);
 	}
 
@@ -858,6 +1054,23 @@ void shim_main(const unsigned char *dtb, uintptr_t load)
 	silver_ticks = speed_ticks();
 	puts_("silver speed ticks ");
 	putdec((int64_t)silver_ticks);
+	puts_(" = ");
+	putdec((int64_t)gold_mhz());
+	puts_(" MHz");
+	{
+		/*
+		 * A 4 KiB-page kernel (TOPAZ_4K, compact KVA at 0xfffffff0...) runs on
+		 * the silver cluster: silver has no 16K granule, but gold only runs at
+		 * 1/4 clock. Boot it right here on silver cpu0.
+		 */
+		const struct payload *pl = find_payload();
+		if (pl && pl->virt_base >= 0xfffffff000000000UL) {
+			fg = CYAN;
+			puts_("\n== SILVER: 4K payload found, booting XNU ==\n");
+			fg = WHITE;
+			boot_xnu(pl);
+		}
+	}
 	puts_("\nwaking gold 0x100, silver parks\n");
 	gold_go = 1;
 	__asm__ volatile("dsb sy" ::: "memory");

@@ -15,7 +15,7 @@ every hardware value is lavender's, measured with our probe shim
 Storage is eMMC (sdhci@c0c4000), not UFS: no storage node yet, the first
 milestone boots to the root-device wait / a ramdisk.
 
-  python mkadt_lavender.py OUT.adt [--dump]
+  python mkadt_lavender.py OUT.adt [--dump] [--silver]
 """
 import hashlib, os, struct, sys
 
@@ -37,6 +37,9 @@ FB, FB_SIZE = 0x9d400000, 0x9a4000          # 1080*2340*4 rounded up to 16K
 TIMEBASE = 19200000
 VTIMER_INTID = 19
 GOLD_MPIDR = (0x100, 0x101, 0x102, 0x103)
+# --silver: 4 KiB-page kernel (TOPAZ_4K) on the A53 cluster (no 16K granule; gold runs at 1/4 clock)
+SILVER_MPIDR = (0x0, 0x1, 0x2, 0x3)
+SILVER = '--silver' in sys.argv
 SWEET_ECID = 0x4c4156454e000001             # 'LAVEN' + 1, synthetic
 
 BOOT_MANIFEST_HASH = hashlib.sha384(b'lavender boot manifest').digest()
@@ -95,7 +98,7 @@ def build(seed=None):
         node('asmb', [ph(), ('lp-sip0', u64(0x6f)), ('lp-sip1', u32(1))])])
 
     cpu_nodes = []
-    for core, mpidr in enumerate(GOLD_MPIDR):
+    for core, mpidr in enumerate(SILVER_MPIDR if SILVER else GOLD_MPIDR):
         cpu_nodes.append(node(f'cpu{core}', [
             ph(),
             ('device_type', cstr('cpu')),
@@ -111,7 +114,7 @@ def build(seed=None):
             ('l3-cache-id', u32(0)),
             ('state', cstr('running' if core == 0 else 'stopped')),
             ('timebase-frequency', u32(TIMEBASE)),
-            ('clock-frequency', u32(2208000000)),
+            ('clock-frequency', u32(1843200000 if SILVER else 2208000000)),
             ('bus-frequency', u32(100000000)),
             ('memory-frequency', u32(1866000000)),
             ('peripheral-frequency', u32(TIMEBASE)),

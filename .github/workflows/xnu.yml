@@ -15,6 +15,9 @@ on:
       keep_going:
         description: make -k (collect all compile errors in one run)
         default: "true"
+      topaz_4k:
+        description: "1 = 4 KiB pages (TOPAZ_4K), lavender: XNU on the silver A53 cluster"
+        default: "0"
   push:
     branches: [lavender]
     paths:
@@ -32,6 +35,7 @@ env:
   MACOS_VERSION: ${{ inputs.macos_version || '13.5' }}
   KERNEL_CONFIG: ${{ inputs.kernel_config || 'DEVELOPMENT' }}
   MACHINE_CONFIG: ${{ inputs.machine_config || 'SWEET' }}
+  TOPAZ_4K: ${{ inputs.topaz_4k || '0' }}
   # ccache: xnu is ~2000 compiles; a patch usually changes a few of them
   CCACHE_DIR: ${{ github.workspace }}/.ccache
   CCACHE_BASEDIR: ${{ github.workspace }}
@@ -83,7 +87,9 @@ jobs:
           xcrun --find iig
           mkdir -p "$CCACHE_WRAP"
           for t in clang clang++; do
-            printf '#!/bin/sh\nexec ccache %s "$@"\n' "$(xcrun -find $t)" > "$CCACHE_WRAP/$t"
+            # assembly includes the generated assym.s, which ccache does not hash
+            # (stale structure offsets after TOPAZ_4K changes): no cache for .s
+            printf '#!/bin/sh\nfor a; do case "$a" in *.s) exec %s "$@";; esac; done\nexec ccache %s "$@"\n' "$(xcrun -find $t)" "$(xcrun -find $t)" > "$CCACHE_WRAP/$t"
             chmod +x "$CCACHE_WRAP/$t"
           done
           cat "$CCACHE_WRAP/clang"
@@ -92,9 +98,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ github.workspace }}/.ccache
-          key: ccache-${{ env.MACHINE_CONFIG }}-${{ env.KERNEL_CONFIG }}-${{ hashFiles('xnu/patches/**', '.github/workflows/xnu.yml') }}
+          key: ccache-${{ env.MACHINE_CONFIG }}-${{ env.KERNEL_CONFIG }}-4k${{ env.TOPAZ_4K }}-${{ hashFiles('xnu/patches/**', '.github/workflows/xnu.yml') }}
           restore-keys: |
-            ccache-${{ env.MACHINE_CONFIG }}-${{ env.KERNEL_CONFIG }}-
+            ccache-${{ env.MACHINE_CONFIG }}-${{ env.KERNEL_CONFIG }}-4k${{ env.TOPAZ_4K }}-
 
       - name: Build
         working-directory: dxb
