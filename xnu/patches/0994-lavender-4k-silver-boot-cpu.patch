@@ -1,0 +1,23 @@
+lavender-0994: TOPAZ_4K boots on silver CPU 0x0, not gold 0x100 (SweetCPU check)
+
+diff --git a/iokit/Kernel/arm/SweetCPU.cpp b/iokit/Kernel/arm/SweetCPU.cpp
+index 96c557b..29d76a5 100644
+--- a/iokit/Kernel/arm/SweetCPU.cpp
++++ b/iokit/Kernel/arm/SweetCPU.cpp
+@@ -148,8 +148,14 @@ SweetCPU::startAll(void *arg __unused, wait_result_t result __unused)
+ 	 * topaz: the ADT lists only the A73 (gold) cores and the shim boots xnu
+ 	 * on gold CPU 0x100 (the silver cluster has no 16K granule).
+ 	 */
+-	if (topology->boot_cpu->cpu_id != 0 || topology->boot_cpu->phys_id != 0x100) {
+-		panic("SWEET CPU: expected boot MPIDR 0x100 and logical CPU 0, got 0x%x/%u",
++#if defined(TOPAZ_4K)
++	/* lavender TOPAZ_4K: the shim boots xnu on silver CPU 0x0 (ADT lists the A53s) */
++	const uint32_t boot_mpidr = 0x0;
++#else
++	const uint32_t boot_mpidr = 0x100;
++#endif
++	if (topology->boot_cpu->cpu_id != 0 || topology->boot_cpu->phys_id != boot_mpidr) {
++		panic("SWEET CPU: expected boot MPIDR 0x%x and logical CPU 0, got 0x%x/%u", boot_mpidr,
+ 		    topology->boot_cpu->phys_id, topology->boot_cpu->cpu_id);
+ 	}
+ 	for (unsigned int i = 0; i < topology->num_cpus; i++) {
