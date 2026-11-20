@@ -15,6 +15,8 @@ phone and reconnects when it comes back.
 import ctypes, ctypes.wintypes as wt, os, sys, time
 
 GUID_STR = '{8F6B4C2E-5A1D-4E7B-9C3A-2D6E1F0A7B55}'
+# WinUSB allows one open handle: a running reader sends the commands queued in this file
+CMD_QUEUE = os.path.join(os.environ.get('TEMP', '.'), 'lavender-usbcmd.txt')
 
 
 class GUID(ctypes.Structure):
@@ -102,6 +104,11 @@ def send_command(word):
     guid = guid_from_str(GUID_STR)
     hf, hu = open_device(guid)
     if hu is None:
+        if device_path(guid):
+            with open(CMD_QUEUE, 'a', encoding='utf-8') as q:   # a reader holds the device: it sends it
+                q.write(word + '\n')
+            print('usblog: queued for the running reader:', word)
+            return 0
         print('usblog: phone not connected over USB')
         return 1
     msg = ('lv:' + word).encode()
@@ -159,12 +166,24 @@ def main():
             kernel32.CloseHandle(hf)
             time.sleep(2)
             continue
-        timeout = wt.ULONG(1000)
+        timeout = wt.ULONG(200)
         winusb.WinUsb_SetPipePolicy(hu, 0x81, 0x03, ctypes.sizeof(timeout), ctypes.byref(timeout))  # PIPE_TRANSFER_TIMEOUT
         print('usblog: connected', flush=True)
         buf = ctypes.create_string_buffer(65536)
         n = wt.ULONG(0)
         while True:
+            if os.path.exists(CMD_QUEUE):
+                try:
+                    with open(CMD_QUEUE, encoding='utf-8') as q:
+                        cmds = [c.strip() for c in q if c.strip()]
+                    os.remove(CMD_QUEUE)
+                except OSError:
+                    cmds = []
+                for c in cmds:
+                    msg = ('lv:' + c).encode()
+                    w = wt.ULONG(0)
+                    okw = winusb.WinUsb_WritePipe(hu, 0x01, msg, len(msg), ctypes.byref(w), None)
+                    f.write(('\n[usblog] sent %s %s\n' % (msg.decode(), 'ok' if okw else 'FAILED error %d' % ctypes.get_last_error())).encode())
             ok = winusb.WinUsb_ReadPipe(hu, 0x81, buf, len(buf), ctypes.byref(n), None)
             if not ok:
                 err = ctypes.get_last_error()

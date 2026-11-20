@@ -1,0 +1,31 @@
+diff --git a/bsd/dev/sweet_usb.c b/bsd/dev/sweet_usb.c
+index f29a6ba..8508353 100644
+--- a/bsd/dev/sweet_usb.c
++++ b/bsd/dev/sweet_usb.c
+@@ -540,6 +540,26 @@ ud_setup(void)
+ 		}
+ 	} else if (req == 10) {         /* GET_INTERFACE */
+ 		data[0] = index == 1 ? ud.data_alt : 0; n = 1;
++	} else if (req == 1 && (type & 0x1f) == 2 && value == 0) {
++		/*
++		 * lavender: CLEAR_FEATURE(ENDPOINT_HALT) - Windows' WinUSB sends it when a program opens
++		 * or closes the device: the host resets its data toggle, so the endpoint's sequence
++		 * number must be reset too (DWC3 ClearStall, as Linux dwc3 does), or every later
++		 * transfer on it fails. A transfer in flight on it is ended and started again.
++		 */
++		unsigned ep = (index & 0x80) ? EP_TX : ((index & 0x7f) == 1 ? EP_RX : 0);
++		if (ep != 0 && ud.configured) {
++			ud_epcmd(ep, 8 | (1u << 11), 0, 0, 0);          /* EndTransfer, ForceRM */
++			ud_epcmd(ep, 5, 0, 0, 0);                       /* ClearStall: sequence number 0 */
++			if (ep == EP_RX) {
++				ud_rx_arm();
++			} else {
++				lck_mtx_lock(ud.lock);
++				ud.tx_busy = false;
++				ud_tx_kick_locked();
++				lck_mtx_unlock(ud.lock);
++			}
++		}
+ 	} else if (req == 1 || req == 3) { /* CLEAR/SET_FEATURE (halt, remote wakeup) */
+ 	} else {
+ 		ok = false;
