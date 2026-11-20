@@ -1,0 +1,112 @@
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+index cd96b91..b05c540 100644
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -769,6 +769,78 @@ get32(const uint8_t *p, uint32_t off)
+ 	return v;
+ }
+ 
++/*
++ * lavender: boot-arg sweetfps_osd=1 puts the frames shown in the last second on the panel (top
++ * left, under the status bar), drawn into each presented frame: a number to compare runs by.
++ * CoreAnimation presents only while something moves, so it reads the rate of the last motion.
++ */
++static int sweet_osd_on = -1;
++static uint32_t sweet_osd_frames, sweet_osd_fps;
++static uint64_t sweet_osd_window;
++
++static bool
++sweet_osd_enabled(void)
++{
++	if (sweet_osd_on < 0) {
++		uint32_t v = 0;
++		sweet_osd_on = PE_parse_boot_argn("sweetfps_osd", &v, sizeof(v)) && v != 0;
++	}
++	return sweet_osd_on > 0;
++}
++
++static void
++sweet_osd_count(void)
++{
++	uint64_t now = mach_absolute_time(), ns = 0;
++
++	if (!sweet_osd_enabled()) {
++		return;
++	}
++	if (sweet_osd_window == 0) {
++		sweet_osd_window = now;
++	}
++	sweet_osd_frames++;
++	absolutetime_to_nanoseconds(now - sweet_osd_window, &ns);
++	if (ns >= 1000000000ull) {
++		sweet_osd_fps = (uint32_t)((uint64_t)sweet_osd_frames * 1000000000ull / ns);
++		sweet_osd_frames = 0;
++		sweet_osd_window = now;
++	}
++}
++
++/* 5x7 digits, a row per byte, bit 4 = leftmost */
++static const uint8_t sweet_osd_font[10][7] = {
++	{ 0x0e, 0x11, 0x13, 0x15, 0x19, 0x11, 0x0e }, { 0x04, 0x0c, 0x04, 0x04, 0x04, 0x04, 0x0e },
++	{ 0x0e, 0x11, 0x01, 0x02, 0x04, 0x08, 0x1f }, { 0x1f, 0x02, 0x04, 0x02, 0x01, 0x11, 0x0e },
++	{ 0x02, 0x06, 0x0a, 0x12, 0x1f, 0x02, 0x02 }, { 0x1f, 0x10, 0x1e, 0x01, 0x01, 0x11, 0x0e },
++	{ 0x06, 0x08, 0x10, 0x1e, 0x11, 0x11, 0x0e }, { 0x1f, 0x01, 0x02, 0x04, 0x08, 0x08, 0x08 },
++	{ 0x0e, 0x11, 0x11, 0x0e, 0x11, 0x11, 0x0e }, { 0x0e, 0x11, 0x11, 0x0f, 0x01, 0x02, 0x0c },
++};
++
++/* draw the number at (x, y) of a 32-bit surface whose row 0 / column 0 is at base */
++static void
++sweet_osd_draw(uint8_t *base, uint32_t bpr, uint32_t x, uint32_t y)
++{
++	enum { S = 5, W = 3 * 6 * S + 2 * S, H = 7 * S + 2 * S };
++	uint32_t v = sweet_osd_fps > 999 ? 999 : sweet_osd_fps;
++	uint8_t digits[3] = { (uint8_t)(v / 100), (uint8_t)(v / 10 % 10), (uint8_t)(v % 10) };
++
++	for (uint32_t r = 0; r < H; r++) {
++		volatile uint32_t *row = (volatile uint32_t *)(base + (uint64_t)(y + r) * bpr) + x;
++		for (uint32_t c = 0; c < W; c++) {
++			uint32_t px = 0xff000000;               /* black box */
++			if (r >= S && r < S + 7 * S && c >= S) {
++				uint32_t d = (c - S) / (6 * S), dc = (c - S) % (6 * S) / S, dr = (r - S) / S;
++				if (d < 3 && dc < 5 && (d != 0 || v >= 100) && (d != 1 || v >= 10) &&
++				    (sweet_osd_font[digits[d]][dr] & (0x10 >> dc))) {
++					px = 0xff00ff00;            /* green */
++				}
++			}
++			row[c] = px;
++		}
++	}
++}
++
+ static uint32_t sweet_fb_swaps_logged;
+ static uint64_t sweet_fb_swap_count;
+ 
+@@ -834,6 +906,7 @@ void
+ AppleCLCD::swap(const uint8_t *rec)
+ {
+ 	sweet_fps_count();
++	sweet_osd_count();
+ 	SweetSurface *held[4] = {};
+ 	uint32_t mask = get32(rec, 0x104);
+ 	for (uint32_t i = 0; i < 4 && i < SWEET_FB_LAYERS; i++) {
+@@ -1316,6 +1389,10 @@ AppleCLCD::directPresent(const uint8_t *rec)
+ 				 */
+ 				if (s->gpuPool) {
+ 					/* GPU pool memory (write-combined): the MDP scans the surface itself, no copy */
++					if (sweet_osd_enabled()) {
++						sweet_osd_draw((uint8_t *)(va + s->offset + (uint64_t)oy * s->bytesPerRow + (uint64_t)ox * 4),
++						    s->bytesPerRow, 40, 150);
++					}
+ 					scanFrom(pa, s->bytesPerRow);
+ 				} else if (fFlip[0] != NULL) {
+ 					flipFrom((const uint8_t *)(va + s->offset + (uint64_t)oy * s->bytesPerRow + (uint64_t)ox * 4),
+@@ -1469,6 +1546,9 @@ AppleCLCD::present(const uint8_t *rec)
+ 		}
+ 		s->release();
+ 	}
++	if (sweet_osd_enabled()) {
++		sweet_osd_draw(dst, fRowBytes, 40, 150);
++	}
+ 	if (fFlip[0] != NULL) {
+ 		flipBack();
+ 	}

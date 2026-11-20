@@ -1470,10 +1470,39 @@ stop:
 		__asm__ volatile("wfe");
 }
 
+static void gold_osm_test(uint32_t top);
+static void gold_pll_test(uint32_t top_l);
+static void gold_osm_clock_fix(void);
+static int gold_set_l(uint32_t l);
+static uint32_t bootarg_u32(const char *cmdline, const char *key, uint32_t dflt);
+
 static void __attribute__((noreturn)) gold_main(void)
 {
 	uint64_t mmfr0 = RD(id_aa64mmfr0_el1);
 	const struct payload *pl = find_payload();
+	if (pl && (bootarg_u32(pl->cmdline, "lv_golddiag=", 0) || bootarg_u32(pl->cmdline, "lv_goldpll=", 0))) {
+		print_cpu("gold", RD(mpidr_el1), RD(midr_el1), mmfr0);
+		if (bootarg_u32(pl->cmdline, "lv_goldpll=", 0))
+			gold_pll_test(bootarg_u32(pl->cmdline, "lv_goldpll=", 73));
+		else
+			gold_osm_test(bootarg_u32(pl->cmdline, "lv_golddiag=", 2));
+		fg = CYAN;
+		puts_("\nGOLD diag done. Photo, then POWER+VOL- for fastboot\n");
+		for (;;)
+			__asm__ volatile("wfe");
+	}
+	if (pl && bootarg_u32(pl->cmdline, "lv_gold=", 0)) {
+		/* lavender: 4K XNU on the A73s at full clock (OSM clock 200 MHz, own PLL at L) */
+		uint32_t l = bootarg_u32(pl->cmdline, "lv_gold=", 0);
+		gold_osm_clock_fix();
+		if (l >= 32 && l <= 115)
+			(void)gold_set_l(l);
+		puts_("\ngold PLL L ");
+		putdec(rd32(PLL_PERFCL + 0x4) & 0xff);
+		puts_(", ");
+		putdec((int64_t)gold_mhz());
+		puts_(" MHz\n");
+	}
 	if (pl) {
 		/* real boot: stay with MMU off (XNU sets up its own), go straight to the loader */
 		fg = CYAN;
@@ -1774,6 +1803,228 @@ static void cpu_step_test(void)
 	fg = WHITE;
 }
 
+/* ---------------- lavender: gold (perfcl) through the OSM, as clk-cpu-osm.c does (2026-11-20) ---------------- */
+/*
+ * Xiaomi lavender kernel drivers/clk/qcom/clk-cpu-osm.c (ref\xiaomi-kernel): TZ has already
+ * programmed the OSM sequencer (no "qcom,osm-no-tz" in the DT); Linux then gives the OSM its
+ * clock (APCS_COMMON_LMH RCG 0x179d112c, 200 MHz from hmss_gpll0 300 MHz: src 1, div 1.5), writes
+ * the LUT (row i at 0x1150 + 32*i: INDEX, FREQ, VOLT = vc<<16 | open-loop mV, OVERRIDE, SPARE),
+ * selects index 0 in DCVS_PERF_STATE_DESIRED (0x1f10), enables (0x1004 = 1) and asks for a rate
+ * by index. perfcl OSM = 0x179c0000 + 8192. LUT: DT qcom,perfcl-speedbin1-v0 (efuse 0x784130 >> 29
+ * = 1 on this phone); open-loop mV: DT apc1 cpr-voltage-ceiling per corner (CPRh is not running
+ * here). Boot-arg lv_golddiag=N: steps up to LUT index N (default 2 = 1401.6 MHz), measuring.
+ */
+#define OSM_BASE_PERF	0x179c2000UL
+#define OSM_ENABLE	0x1004
+#define OSM_INDEX	0x1150
+#define OSM_FREQ	0x1154
+#define OSM_VOLT	0x1158
+#define OSM_OVERRIDE	0x115c
+#define OSM_SPARE	0x1164
+#define OSM_PSTATE	0x1f10
+#define OSM_CLK_CMD	0x179d112cUL
+#define OSM_CLK_CFG	0x179d1130UL
+
+static const uint32_t perfcl_lut[7][5] = {
+	{ 300000000u,  0x0004000f, 0x01200020, 1, 1 },
+	{ 1113600000u, 0x0404003a, 0x052e002e, 1, 2 },
+	{ 1401600000u, 0x04040049, 0x073a003a, 2, 3 },
+	{ 1747200000u, 0x0404005b, 0x09480048, 2, 4 },
+	{ 1958400000u, 0x04040066, 0x0a510051, 2, 5 },
+	{ 2150400000u, 0x04040070, 0x0b590059, 2, 6 },
+	{ 2208000000u, 0x04040073, 0x0b5c005c, 3, 7 },
+};
+static const uint32_t apc1_corner_mv[7] = { 725, 725, 790, 868, 988, 988, 1068 };
+
+static void osm_regs(const char *what)
+{
+	puts_(what);
+	puts_(": OSM ver perf ");
+	puthex(rd32(OSM_BASE_PERF), 8);
+	puts_(" pwr ");
+	puthex(rd32(0x179c0000UL), 8);
+	puts_(" en ");
+	puthex(rd32(OSM_BASE_PERF + OSM_ENABLE), 8);
+	puts_(" pstate ");
+	puthex(rd32(OSM_BASE_PERF + OSM_PSTATE), 8);
+	puts_(" clk ");
+	puthex(rd32(OSM_CLK_CMD), 8);
+	putc_('/');
+	puthex(rd32(OSM_CLK_CFG), 8);
+	putc_('\n');
+	pll_line("  PLL gold", PLL_PERFCL);
+	puts_("  gold RCG cfg ");
+	puthex(rd32(0x17811054UL), 8);
+	puts_(", gold ");
+	putdec((int64_t)gold_mhz());
+	puts_(" MHz\n");
+}
+
+static void gold_osm_test(uint32_t top)
+{
+	fg = CYAN;
+	puts_("\n-- gold through the OSM (clk-cpu-osm.c) --\n");
+	fg = WHITE;
+	if (top > 6)
+		top = 6;
+	osm_regs("before");
+
+	/* 1. the OSM's own clock: 200 MHz = hmss_gpll0 300 MHz / 1.5 (cfg src 1, div field 2) */
+	wr32(OSM_CLK_CFG, (1u << 8) | 2u);
+	wr32(OSM_CLK_CMD, 0x3);                 /* ROOT_EN | UPDATE */
+	for (int n = 0; (rd32(OSM_CLK_CMD) & 1) && n < 100000; n++)
+		;
+	osm_regs("osm clk");
+
+	/* 2. the LUT (rows past the table repeat the last one, as clk_osm_setup_hw_table) */
+	uint32_t f = 0, v = 0, o = 0, s = 0;
+	for (uint32_t i = 0; i < 40; i++) {
+		if (i < 7) {
+			f = perfcl_lut[i][1];
+			v = ((perfcl_lut[i][4] - 1) << 16) | apc1_corner_mv[perfcl_lut[i][4] - 1];
+			o = perfcl_lut[i][2];
+			s = perfcl_lut[i][3];
+		}
+		uint32_t row = OSM_BASE_PERF + i * 32;
+		wr32(row + OSM_INDEX, i);
+		wr32(row + OSM_FREQ, f);
+		wr32(row + OSM_VOLT, v);
+		wr32(row + OSM_OVERRIDE, o);
+		wr32(row + OSM_SPARE, s);
+	}
+	puts_("LUT written, row 2 reads ");
+	puthex(rd32(OSM_BASE_PERF + 2 * 32 + OSM_FREQ), 8);
+	putc_(' ');
+	puthex(rd32(OSM_BASE_PERF + 2 * 32 + OSM_VOLT), 8);
+	putc_('\n');
+
+	/* 3. index 0, enable */
+	wr32(OSM_BASE_PERF + OSM_PSTATE, 0);
+	for (volatile int i = 0; i < 10000; i++)
+		;
+	wr32(OSM_BASE_PERF + OSM_ENABLE, 1);
+	for (volatile int i = 0; i < 100000; i++)
+		;
+	osm_regs("enabled, index 0");
+
+	/* 4. step up, a checksum run at each step */
+	uint64_t ref = stress_sum();
+	for (uint32_t idx = 1; idx <= top; idx++) {
+		puts_("index ");
+		putdec(idx);
+		puts_(" (");
+		putdec(perfcl_lut[idx][0] / 1000000);
+		puts_(" MHz): ");
+		__asm__ volatile("dsb sy" ::: "memory");
+		wr32(OSM_BASE_PERF + OSM_PSTATE, idx);
+		for (volatile int i = 0; i < 1000000; i++)
+			;
+		puts_("pstate ");
+		puthex(rd32(OSM_BASE_PERF + OSM_PSTATE), 2);
+		puts_(", gold ");
+		putdec((int64_t)gold_mhz());
+		puts_(" MHz, L ");
+		putdec(rd32(PLL_PERFCL + 0x4) & 0xff);
+		puts_(", checksums ");
+		int bad = 0;
+		for (int k = 0; k < 20; k++)
+			bad += stress_sum() != ref;
+		fg = bad ? RED : GREEN;
+		putdec(20 - bad);
+		puts_("/20\n");
+		fg = WHITE;
+		if (bad)
+			break;
+	}
+	osm_regs("end");
+}
+
+/*
+ * lavender (2026-11-20, m17 result): gold ran at 148 MHz because the OSM/LMH clock (APCS_COMMON
+ * RCG 0x179d112c, cfg 0x105 from XBL = 100 MHz) was slow; at 0x102 (200 MHz, clk-cpu-osm.c's
+ * rate) gold runs at the full 593 MHz of GPLL0 at once. The OSM itself then takes the LUT but
+ * does not change the rate (CPRh is not running). So the gold PLL is driven by hand: gold moves
+ * to GPLL0 (RCG src 4), relocks its own PLL at L, moves to the PLL main output (src 3).
+ */
+static void gold_osm_clock_fix(void)
+{
+	wr32(OSM_CLK_CFG, (1u << 8) | 2u);
+	wr32(OSM_CLK_CMD, 0x3);
+	for (int n = 0; (rd32(OSM_CLK_CMD) & 1) && n < 100000; n++)
+		;
+}
+
+static void gold_rcg(uint32_t src)
+{
+	uint32_t cfg = rd32(RCGR_GOLD_CFG);
+	wr32(RCGR_GOLD_CFG, (cfg & ~0x71fu) | (src << 8) | 1u);
+	wr32(RCGR_GOLD_CMD, 0x3);
+	for (int n = 0; (rd32(RCGR_GOLD_CMD) & 1) && n < 100000; n++)
+		;
+	__asm__ volatile("isb");
+}
+
+static int gold_set_l(uint32_t l)
+{
+	gold_rcg(4);                            /* GPLL0 while the PLL relocks */
+	gold_pll_relock(l);
+	if (!(rd32(PLL_PERFCL + 0x2c) & (1u << 16)))
+		return -1;
+	gold_rcg(3);                            /* PLL main */
+	return 0;
+}
+
+static void gold_pll_test(uint32_t top_l)
+{
+	static const uint32_t steps[] = { 32, 46, 58, 66, 73, 80, 87, 91, 96, 102, 106, 112, 115 };
+	fg = CYAN;
+	puts_("\n-- gold: OSM clock fix + own PLL by hand --\n");
+	fg = WHITE;
+	puts_("gold ");
+	putdec((int64_t)gold_mhz());
+	puts_(" MHz, OSM clk cfg ");
+	puthex(rd32(OSM_CLK_CFG), 8);
+	putc_('\n');
+	gold_osm_clock_fix();
+	puts_("OSM clk 200 MHz: gold ");
+	putdec((int64_t)gold_mhz());
+	puts_(" MHz\n");
+	uint64_t ref = stress_sum();
+	for (unsigned i = 0; i < sizeof(steps) / sizeof(steps[0]) && steps[i] <= top_l; i++) {
+		puts_("L ");
+		putdec(steps[i]);
+		puts_(" (");
+		putdec((int64_t)steps[i] * 192 / 10);
+		puts_(" MHz): ");
+		__asm__ volatile("dsb sy" ::: "memory");
+		if (gold_set_l(steps[i]) != 0) {
+			fg = RED;
+			puts_("PLL no lock\n");
+			fg = WHITE;
+			gold_rcg(4);
+			return;
+		}
+		puts_("gold ");
+		putdec((int64_t)gold_mhz());
+		puts_(" MHz, checksums ");
+		int bad = 0;
+		for (int k = 0; k < 20; k++)
+			bad += stress_sum() != ref;
+		fg = bad ? RED : GREEN;
+		putdec(20 - bad);
+		puts_("/20\n");
+		fg = WHITE;
+		if (bad) {
+			puts_("back to GPLL0\n");
+			gold_rcg(4);
+			return;
+		}
+	}
+	fg = GREEN;
+	puts_("gold steps done\n");
+	fg = WHITE;
+}
+
 /* ---------------- v2 main: silver -> gold hand-off ---------------- */
 void shim_main(const unsigned char *dtb, uintptr_t load)
 {
@@ -1832,7 +2083,9 @@ void shim_main(const unsigned char *dtb, uintptr_t load)
 				puts_(" MHz\n");
 			}
 		}
-		if (pl && pl->virt_base >= 0xfffffff000000000UL && !GPU_PROBE_ON_GOLD) {
+		if (pl && pl->virt_base >= 0xfffffff000000000UL && !GPU_PROBE_ON_GOLD &&
+		    !bootarg_u32(pl->cmdline, "lv_golddiag=", 0) && !bootarg_u32(pl->cmdline, "lv_goldpll=", 0) &&
+		    !bootarg_u32(pl->cmdline, "lv_gold=", 0)) {
 			fg = CYAN;
 			puts_("\n== SILVER: 4K payload found, booting XNU ==\n");
 			fg = WHITE;
