@@ -1,8 +1,22 @@
 diff --git a/bsd/dev/sweet_usb.c b/bsd/dev/sweet_usb.c
-index f29a6ba..e4e5bec 100644
+index f29a6ba..633c14f 100644
 --- a/bsd/dev/sweet_usb.c
 +++ b/bsd/dev/sweet_usb.c
-@@ -205,6 +205,11 @@ static struct {
+@@ -15,6 +15,13 @@
+ #include <sys/systm.h>
+ #include <kern/clock.h>
+ #include <kern/thread.h>
++#include <kern/task.h>
++#include <sys/proc.h>
++#include <sys/proc_internal.h>
++#include <mach/task_info.h>
++#include <libkern/libkern.h>
++#include <kern/kalloc.h>
++#include <machine/atomic.h>
+ #include <kern/sched_prim.h>
+ #include <machine/machine_routines.h>
+ #include <arm/caches_internal.h>
+@@ -205,6 +212,11 @@ static struct {
  	mbuf_t      txq[UD_TXQ];
  	unsigned    txq_head, txq_count;
  	bool        tx_busy;
@@ -14,7 +28,7 @@ index f29a6ba..e4e5bec 100644
  	uint64_t    rx_frames, tx_frames;
  } ud;
  
-@@ -260,7 +265,7 @@ ud_epcmd(unsigned ep, uint32_t cmd, uint32_t p0, uint32_t p1, uint32_t p2)
+@@ -260,7 +272,7 @@ ud_epcmd(unsigned ep, uint32_t cmd, uint32_t p0, uint32_t p1, uint32_t p2)
  }
  
  /* One TRB (at DMA offset trb) on physical endpoint ep. */
@@ -23,7 +37,7 @@ index f29a6ba..e4e5bec 100644
  ud_start_trb(unsigned ep, uint32_t trb, uint32_t buf, uint32_t len, uint32_t ctl)
  {
  	volatile uint32_t *t = (volatile uint32_t *)(ud.dma + trb);
-@@ -275,7 +280,7 @@ ud_start_trb(unsigned ep, uint32_t trb, uint32_t buf, uint32_t len, uint32_t ctl
+@@ -275,7 +287,7 @@ ud_start_trb(unsigned ep, uint32_t trb, uint32_t buf, uint32_t len, uint32_t ctl
  		ud_sync(buf, len);
  	}
  	uint64_t tpa = ud.dma_pa + trb;
@@ -32,7 +46,7 @@ index f29a6ba..e4e5bec 100644
  }
  
  static void
-@@ -426,15 +431,20 @@ ud_w_send(const char *buf, uint32_t len)
+@@ -426,15 +438,20 @@ ud_w_send(const char *buf, uint32_t len)
  	if (ud.configured && !ud.tx_busy && len > 0 && len < UD_FRAME_MAX) {
  		memcpy((void *)(ud.dma + UD_TX), buf, len);
  		ud.tx_busy = true;
@@ -55,7 +69,7 @@ index f29a6ba..e4e5bec 100644
  static void ud_tx_kick_locked(void);
  
  /* NETWORK_CONNECTION notification: the host brings its link up on it. */
-@@ -486,6 +496,7 @@ ud_setup(void)
+@@ -486,6 +503,7 @@ ud_setup(void)
  	bool ok = true;
  
  	printf("SWEET USB: setup %02x %02x %04x %04x len %u\n", type, req, value, index, length);
@@ -63,7 +77,7 @@ index f29a6ba..e4e5bec 100644
  	ud.data_in = (type & 0x80) != 0;
  	if ((type & 0x60) == 0x20) {    /* class request (e.g. SET_ETHERNET_PACKET_FILTER) */
  		ok = (length == 0);
-@@ -540,6 +551,30 @@ ud_setup(void)
+@@ -540,6 +558,30 @@ ud_setup(void)
  		}
  	} else if (req == 10) {         /* GET_INTERFACE */
  		data[0] = index == 1 ? ud.data_alt : 0; n = 1;
@@ -94,7 +108,7 @@ index f29a6ba..e4e5bec 100644
  	} else if (req == 1 || req == 3) { /* CLEAR/SET_FEATURE (halt, remote wakeup) */
  	} else {
  		ok = false;
-@@ -568,7 +603,37 @@ ud_setup(void)
+@@ -568,7 +610,37 @@ ud_setup(void)
  static void
  ud_rx_arm(void)
  {
@@ -133,7 +147,7 @@ index f29a6ba..e4e5bec 100644
  }
  
  /*
-@@ -579,11 +644,257 @@ ud_rx_arm(void)
+@@ -579,11 +651,618 @@ ud_rx_arm(void)
   *   "lv:reboot"    PSCI SYSTEM_RESET
   *   "lv:poweroff"  PSCI SYSTEM_OFF
   */
@@ -375,6 +389,367 @@ index f29a6ba..e4e5bec 100644
 +	return true;
 +}
 +
++/*
++ * lavender: "lv:prof NAME SECS" - a sampling profiler for one process (default backboardd, 5 s).
++ * Every millisecond each other online CPU gets an immediate cross-call; on it, if the thread it
++ * interrupted belongs to NAME, that thread's user pc and lr are counted (its user registers as
++ * saved when it last entered the kernel: a thread inside a syscall counts at its call site).
++ * Then: how the CPUs' time went (NAME / other / idle), the busiest images (dyld's image list),
++ * the busiest addresses and callers, as "PROF ..." lines in the log.
++ */
++extern void *cpu_datap(int cpu);
++extern kern_return_t cpu_immediate_xcall(int cpu_number, void (*func)(void *), void *param);
++extern kern_return_t vm_map_read_user(vm_map_t map, vm_map_address_t src, void *dst, vm_size_t size);
++extern task_t proc_task(proc_t);
++extern task_t get_threadtask(thread_t);
++extern vm_map_t get_task_map(task_t);
++extern kern_return_t task_info(task_t, task_flavor_t, task_info_t, mach_msg_type_number_t *);
++
++#define LVP_SLOTS 8192
++static struct { uint64_t key; uint32_t n; uint32_t pad; } lvp_pc[LVP_SLOTS], lvp_lr[LVP_SLOTS];
++static volatile task_t lvp_task;
++static volatile uint32_t lvp_hits, lvp_other, lvp_idle, lvp_lost;
++static volatile bool lvp_busy;
++static char lvp_name[32];
++static uint32_t lvp_secs;
++static thread_t lvp_idle_thread_dummy;
++
++static void
++lvp_add(typeof(lvp_pc[0]) *t, uint64_t key)
++{
++	uint32_t h = (uint32_t)((key >> 2) * 2654435761u) & (LVP_SLOTS - 1);
++	for (int i = 0; i < 64; i++, h = (h + 1) & (LVP_SLOTS - 1)) {
++		uint64_t k = t[h].key;
++		if (k == key || (k == 0 && os_atomic_cmpxchg(&t[h].key, 0ull, key, relaxed)) || t[h].key == key) {
++			os_atomic_inc(&t[h].n, relaxed);
++			return;
++		}
++	}
++	os_atomic_inc(&lvp_lost, relaxed);
++}
++
++static void
++lvp_sample(void *arg __unused)
++{
++	thread_t th = current_thread();
++	task_t task = get_threadtask(th);
++
++	if (task == lvp_task) {
++		arm_saved_state_t *ss = find_user_regs(th);
++		if (ss != NULL) {
++			lvp_add(lvp_pc, get_saved_state_pc(ss));
++			lvp_add(lvp_lr, get_saved_state_lr(ss));
++			os_atomic_inc(&lvp_hits, relaxed);
++			return;
++		}
++	}
++	if (task == kernel_task) {
++		os_atomic_inc(&lvp_idle, relaxed);      /* idle thread or a kernel thread */
++	} else {
++		os_atomic_inc(&lvp_other, relaxed);
++	}
++}
++
++static int
++lvp_find_proc(proc_t p, void *arg __unused)
++{
++	char name[32];
++	proc_name(proc_pid(p), name, sizeof(name));
++	if (lvp_task == TASK_NULL && strncmp(name, lvp_name, sizeof(name)) == 0) {
++		task_t t = proc_task(p);
++		if (t != TASK_NULL) {
++			task_reference(t);
++			lvp_task = t;
++		}
++	}
++	return PROC_RETURNED;
++}
++
++struct lvp_img { uint64_t load; uint64_t path; uint64_t date; };
++
++static int
++lvp_img_cmp(const void *a, const void *b)
++{
++	uint64_t x = ((const struct lvp_img *)a)->load, y = ((const struct lvp_img *)b)->load;
++	return x < y ? -1 : x > y;
++}
++
++/* index of the image holding pc (the last one loaded at or below it), -1 if none */
++static int
++lvp_img_of(const struct lvp_img *im, uint32_t n, uint64_t pc)
++{
++	int lo = 0, hi = (int)n - 1, best = -1;
++	while (lo <= hi) {
++		int mid = (lo + hi) / 2;
++		if (im[mid].load <= pc) {
++			best = mid;
++			lo = mid + 1;
++		} else {
++			hi = mid - 1;
++		}
++	}
++	return best;
++}
++
++static void
++lvp_path(vm_map_t map, uint64_t up, char *out, size_t len)
++{
++	out[0] = 0;
++	if (up == 0 || vm_map_read_user(map, up, out, len - 1) != KERN_SUCCESS) {
++		strlcpy(out, "?", len);
++	}
++	out[len - 1] = 0;
++	const char *slash = NULL;
++	for (const char *q = out; *q; q++) {
++		if (*q == '/') {
++			slash = q;
++		}
++	}
++	if (slash != NULL) {
++		memmove(out, slash + 1, strlen(slash + 1) + 1);
++	}
++}
++
++static void
++lvp_report(typeof(lvp_pc[0]) *t, const char *what, int top, vm_map_t map, struct lvp_img *im, uint32_t nim)
++{
++	static bool taken[LVP_SLOTS];
++	char path[96];
++
++	bzero(taken, sizeof(taken));
++	for (int r = 0; r < top; r++) {
++		int best = -1;
++		for (int i = 0; i < LVP_SLOTS; i++) {
++			if (t[i].key != 0 && !taken[i] && (best < 0 || t[i].n > t[best].n)) {
++				best = i;
++			}
++		}
++		if (best < 0 || t[best].n < 2) {
++			break;
++		}
++		taken[best] = true;
++		int ii = im != NULL ? lvp_img_of(im, nim, t[best].key) : -1;
++		if (ii >= 0) {
++			lvp_path(map, im[ii].path, path, sizeof(path));
++		} else {
++			strlcpy(path, "?", sizeof(path));
++		}
++		printf("PROF %s %2d: 0x%llx %u (%u.%u%%) %s+0x%llx\n", what, r, t[best].key, t[best].n,
++		    t[best].n * 100 / (lvp_hits ? lvp_hits : 1), (t[best].n * 1000 / (lvp_hits ? lvp_hits : 1)) % 10,
++		    path, ii >= 0 ? t[best].key - im[ii].load : 0);
++	}
++}
++
++static void
++lvp_thread(void *arg __unused, wait_result_t wr __unused)
++{
++	int maxcpu = (int)ml_get_max_cpu_number();
++	uint64_t rounds = 0;
++	struct task_dyld_info di;
++	mach_msg_type_number_t cnt = TASK_DYLD_INFO_COUNT;
++	struct lvp_img *im = NULL;
++	uint32_t nim = 0;
++	uint64_t hdr[24];
++
++	bzero(lvp_pc, sizeof(lvp_pc));
++	bzero(lvp_lr, sizeof(lvp_lr));
++	lvp_hits = lvp_other = lvp_idle = lvp_lost = 0;
++	lvp_task = TASK_NULL;
++	proc_iterate(PROC_ALLPROCLIST, lvp_find_proc, NULL, NULL, NULL);
++	if (lvp_task == TASK_NULL) {
++		printf("PROF %s: no such process\n", lvp_name);
++		lvp_busy = false;
++		return;
++	}
++	printf("PROF %s: sampling %u s on CPUs 0-%d\n", lvp_name, lvp_secs, maxcpu);
++	uint64_t end = mach_absolute_time(), ms;
++	nanoseconds_to_absolutetime((uint64_t)lvp_secs * NSEC_PER_SEC, &ms);
++	end += ms;
++	while (mach_absolute_time() < end) {
++		int me = cpu_number();
++		for (int c = 0; c <= maxcpu; c++) {
++			if (c != me && cpu_datap(c) != NULL) {
++				(void)cpu_immediate_xcall(c, lvp_sample, (void *)&lvp_idle_thread_dummy);
++			}
++		}
++		rounds++;
++		ud_sleep_ms(1);
++	}
++	ud_sleep_ms(5);
++	uint32_t all = lvp_hits + lvp_other + lvp_idle;
++	printf("PROF %s: %llu rounds, %u samples: %s %u%%, other processes %u%%, kernel/idle %u%% (lost %u)\n",
++	    lvp_name, rounds, all, lvp_name, lvp_hits * 100 / (all ? all : 1), lvp_other * 100 / (all ? all : 1),
++	    lvp_idle * 100 / (all ? all : 1), lvp_lost);
++
++	/* dyld's image list: which library each address is in */
++	vm_map_t map = get_task_map(lvp_task);
++	if (task_info(lvp_task, TASK_DYLD_INFO, (task_info_t)&di, &cnt) == KERN_SUCCESS && di.all_image_info_addr != 0 &&
++	    vm_map_read_user(map, di.all_image_info_addr, hdr, sizeof(hdr)) == KERN_SUCCESS) {
++		uint32_t count = (uint32_t)(hdr[0] >> 32);
++		uint64_t arr = hdr[1];
++		printf("PROF images %u, shared cache slide 0x%llx base 0x%llx\n", count, hdr[19], hdr[22]);
++		if (count > 0 && count < 4096) {
++			im = (struct lvp_img *)kalloc_data(count * sizeof(*im), Z_WAITOK);
++			if (im != NULL && vm_map_read_user(map, arr, im, count * sizeof(*im)) == KERN_SUCCESS) {
++				nim = count;
++				qsort(im, nim, sizeof(*im), lvp_img_cmp);
++			}
++		}
++	}
++	/* per image */
++	if (nim != 0) {
++		static uint32_t per[4096];
++		char path[96];
++		bzero(per, sizeof(per));
++		for (int i = 0; i < LVP_SLOTS; i++) {
++			if (lvp_pc[i].key != 0) {
++				int ii = lvp_img_of(im, nim, lvp_pc[i].key);
++				if (ii >= 0) {
++					per[ii] += lvp_pc[i].n;
++				}
++			}
++		}
++		for (int r = 0; r < 15; r++) {
++			int best = -1;
++			for (uint32_t i = 0; i < nim; i++) {
++				if (per[i] != 0 && (best < 0 || per[i] > per[best])) {
++					best = (int)i;
++				}
++			}
++			if (best < 0) {
++				break;
++			}
++			lvp_path(map, im[best].path, path, sizeof(path));
++			printf("PROF image %2d: %u.%u%% %s (load 0x%llx)\n", r, per[best] * 100 / (lvp_hits ? lvp_hits : 1),
++			    (per[best] * 1000 / (lvp_hits ? lvp_hits : 1)) % 10, path, im[best].load);
++			per[best] = 0;
++		}
++	}
++	lvp_report(lvp_pc, "pc", 40, map, im, nim);
++	lvp_report(lvp_lr, "lr", 25, map, im, nim);
++	printf("PROF %s: done\n", lvp_name);
++	if (im != NULL) {
++		kfree_data(im, nim ? nim * sizeof(*im) : 0);
++	}
++	task_deallocate(lvp_task);
++	lvp_task = TASK_NULL;
++	lvp_busy = false;
++}
++
++/*
++ * lavender debug: "lv:peek PA [N]" prints N (default 1, at most 64) 32-bit registers from
++ * physical address PA (hex); "lv:poke PA VALUE" writes one (hex). Device registers only.
++ */
++static uint64_t
++ud_hex(const char **p)
++{
++	uint64_t v = 0;
++	while (**p == ' ') {
++		(*p)++;
++	}
++	if ((*p)[0] == '0' && ((*p)[1] == 'x' || (*p)[1] == 'X')) {
++		*p += 2;
++	}
++	for (;; (*p)++) {
++		char c = **p;
++		if (c >= '0' && c <= '9') {
++			v = v * 16 + (uint64_t)(c - '0');
++		} else if (c >= 'a' && c <= 'f') {
++			v = v * 16 + (uint64_t)(c - 'a' + 10);
++		} else if (c >= 'A' && c <= 'F') {
++			v = v * 16 + (uint64_t)(c - 'A' + 10);
++		} else {
++			break;
++		}
++	}
++	return v;
++}
++
++static bool
++ud_w_peek_command(const char *buf, uint32_t len)
++{
++	char line[80];
++	const char *q;
++	bool poke;
++
++	if (len < 9 || len >= sizeof(line)) {
++		return false;
++	}
++	memcpy(line, buf, len);
++	line[len] = 0;
++	if (strncmp(line, "lv:peek ", 8) == 0) {
++		poke = false;
++	} else if (strncmp(line, "lv:poke ", 8) == 0) {
++		poke = true;
++	} else {
++		return false;
++	}
++	q = line + 8;
++	uint64_t pa = ud_hex(&q) & ~3ull, arg = ud_hex(&q);
++	uint32_t n = poke ? 1 : (arg == 0 ? 1 : (arg > 64 ? 64 : (uint32_t)arg));
++	vm_offset_t va = ml_io_map((vm_offset_t)(pa & ~0xfffull), 0x2000);
++	if (va == 0 || (pa & 0xfff) + n * 4 > 0x2000) {
++		printf("SWEET USB: peek 0x%llx: cannot map\n", pa);
++		return true;
++	}
++	volatile uint32_t *r = (volatile uint32_t *)(va + (pa & 0xfff));
++	if (poke) {
++		uint32_t old = r[0];
++		r[0] = (uint32_t)arg;
++		__asm__ volatile ("dsb sy" ::: "memory");
++		printf("SWEET USB: poke 0x%llx: 0x%08x -> 0x%08x (reads 0x%08x)\n", pa, old, (uint32_t)arg, r[0]);
++		return true;
++	}
++	for (uint32_t i = 0; i < n; i += 4) {
++		char out[100];
++		int m = snprintf(out, sizeof(out), "SWEET USB: peek 0x%llx:", pa + i * 4);
++		for (uint32_t j = i; j < n && j < i + 4; j++) {
++			m += snprintf(out + m, sizeof(out) - (size_t)m, " %08x", r[j]);
++		}
++		printf("%s\n", out);
++	}
++	return true;
++}
++
++static bool
++ud_w_prof_command(const char *buf, uint32_t len)
++{
++	char line[64];
++	thread_t th;
++	uint32_t i = 8, n = 0, secs = 0;
++
++	if (len < 7 || len >= sizeof(line) || memcmp(buf, "lv:prof", 7) != 0) {
++		return false;
++	}
++	memcpy(line, buf, len);
++	line[len] = 0;
++	strlcpy(lvp_name, "backboardd", sizeof(lvp_name));
++	if (len > 8) {
++		while (line[i] != 0 && line[i] != ' ' && n < sizeof(lvp_name) - 1) {
++			lvp_name[n++] = line[i++];
++		}
++		if (n > 0) {
++			lvp_name[n] = 0;
++		}
++		while (line[i] == ' ') {
++			i++;
++		}
++		while (line[i] >= '0' && line[i] <= '9') {
++			secs = secs * 10 + (uint32_t)(line[i++] - '0');
++		}
++	}
++	lvp_secs = secs > 0 && secs <= 60 ? secs : 5;
++	if (!lvp_busy) {
++		lvp_busy = true;
++		if (kernel_thread_start(lvp_thread, NULL, &th) == KERN_SUCCESS) {
++			thread_deallocate(th);
++		} else {
++			lvp_busy = false;
++		}
++	}
++	return true;
++}
++
 +static uint64_t
 +ud_psci2(uint64_t fn, uint64_t a1, uint64_t a2)
  {
@@ -393,7 +768,7 @@ index f29a6ba..e4e5bec 100644
  }
  
  static bool
-@@ -596,10 +907,50 @@ ud_w_command(const char *buf, uint32_t len)
+@@ -596,10 +1275,50 @@ ud_w_command(const char *buf, uint32_t len)
  			*(volatile uint32_t *)(imem + 0x65c) = 0x77665500;
  			__asm__ volatile ("dsb sy" ::: "memory");
  		}
@@ -430,7 +805,7 @@ index f29a6ba..e4e5bec 100644
 +		}
 +		return true;
 +	}
-+	if (ud_w_key_command(buf, len)) {
++	if (ud_w_key_command(buf, len) || ud_w_prof_command(buf, len) || ud_w_peek_command(buf, len)) {
 +		return true;
 +	}
 +	if (len >= 6 && memcmp(buf, "lv:pon", 6) == 0) {            /* lavender: PON registers, no change */
@@ -445,7 +820,7 @@ index f29a6ba..e4e5bec 100644
  	if (len >= 9 && memcmp(buf, "lv:reboot", 9) == 0) {
  		printf("SWEET USB: command: reboot\n");
  		delay(200000);
-@@ -771,7 +1122,10 @@ ud_tx_kick_locked(void)
+@@ -771,7 +1490,10 @@ ud_tx_kick_locked(void)
  		}
  		ud.tx_busy = true;
  		ud.tx_frames++;
@@ -457,7 +832,7 @@ index f29a6ba..e4e5bec 100644
  	}
  }
  
-@@ -897,7 +1251,22 @@ ud_event(uint32_t ev)
+@@ -897,7 +1619,22 @@ ud_event(uint32_t ev)
  		uint32_t type = (ev >> 8) & 0xf;
  		if (type == 1) {        /* USB reset */
  			dwc_wr(DCFG, dwc_rd(DCFG) & ~(0x7fu << 3));
@@ -481,7 +856,7 @@ index f29a6ba..e4e5bec 100644
  		} else if (type == 2) { /* connect done */
  			uint32_t speed = dwc_rd(DSTS) & 7;
  			/* ep0 max packet: 64 at high/full speed (modify action) */
-@@ -907,6 +1276,7 @@ ud_event(uint32_t ev)
+@@ -907,6 +1644,7 @@ ud_event(uint32_t ev)
  			    (1u << 8) | (1u << 10) | (1u << 25), 0);
  			printf("SWEET USB: connected, speed %u\n", speed);
  		} else if (type == 0) {
@@ -489,7 +864,7 @@ index f29a6ba..e4e5bec 100644
  			printf("SWEET USB: disconnect\n");
  		}
  		return;
-@@ -915,7 +1285,11 @@ ud_event(uint32_t ev)
+@@ -915,7 +1653,11 @@ ud_event(uint32_t ev)
  	unsigned type = (ev >> 6) & 0xf;
  	unsigned status = (ev >> 12) & 0xf;
  
@@ -501,7 +876,7 @@ index f29a6ba..e4e5bec 100644
  		ud_rx_done();
  		return;
  	}
-@@ -961,6 +1335,51 @@ ud_event(uint32_t ev)
+@@ -961,6 +1703,51 @@ ud_event(uint32_t ev)
  	}
  }
  
@@ -553,7 +928,7 @@ index f29a6ba..e4e5bec 100644
  static void
  ud_thread(void *arg __unused, wait_result_t wr __unused)
  {
-@@ -972,13 +1391,19 @@ ud_thread(void *arg __unused, wait_result_t wr __unused)
+@@ -972,13 +1759,19 @@ ud_thread(void *arg __unused, wait_result_t wr __unused)
  			for (uint32_t done = 0; done < count; done += 4) {
  				uint32_t ev = *(volatile uint32_t *)(ud.dma + UD_EVT + ud.evt_pos);
  				ud.evt_pos = (ud.evt_pos + 4) % UD_EVT_SIZE;
@@ -574,7 +949,7 @@ index f29a6ba..e4e5bec 100644
  		if ((++ticks % 30000) == 0) {
  			printf("SWEET USB: ue0 rx %llu tx %llu frames\n", ud.rx_frames, ud.tx_frames);
  		}
-@@ -1013,6 +1438,10 @@ ud_log_thread(void *arg __unused, wait_result_t wr __unused)
+@@ -1013,6 +1806,10 @@ ud_log_thread(void *arg __unused, wait_result_t wr __unused)
  				ud_sleep_ms(50);
  				continue;
  			}
@@ -585,7 +960,7 @@ index f29a6ba..e4e5bec 100644
  			if (pending == 0) {
  				pending = sweet_log_copy(&pos, chunk, sizeof(chunk) - 1);
  				if (pending != 0 && (pending % 512) == 0) {
-@@ -1077,8 +1506,26 @@ sweet_usb_gadget_start(vm_offset_t dwc)
+@@ -1077,8 +1874,26 @@ sweet_usb_gadget_start(vm_offset_t dwc)
  	} else {
  		ud_if_create();
  	}
@@ -613,7 +988,7 @@ index f29a6ba..e4e5bec 100644
  	dwc_wr(DCTL, DCTL_CSFTRST);
  	int i;
  	for (i = 0; i < 500 && (dwc_rd(DCTL) & DCTL_CSFTRST); i++) {
-@@ -1087,7 +1534,7 @@ sweet_usb_gadget_start(vm_offset_t dwc)
+@@ -1087,7 +1902,7 @@ sweet_usb_gadget_start(vm_offset_t dwc)
  	printf("SWEET USB: soft reset %s after %d ms, GCTL 0x%08x DCFG 0x%08x\n",
  	    (dwc_rd(DCTL) & DCTL_CSFTRST) ? "STUCK" : "done", i, dwc_rd(GCTL), dwc_rd(DCFG));
  	if (dwc_rd(DCTL) & DCTL_CSFTRST) {
@@ -622,7 +997,7 @@ index f29a6ba..e4e5bec 100644
  	}
  
  	dwc_wr(GEVNTADRLO, (uint32_t)(ud.dma_pa + UD_EVT));
-@@ -1109,7 +1556,7 @@ sweet_usb_gadget_start(vm_offset_t dwc)
+@@ -1109,7 +1924,7 @@ sweet_usb_gadget_start(vm_offset_t dwc)
  	    ud_epcmd(1, DEPCMD_SETEPCONFIG, (0u << 1) | (512u << 3), (1u << 8) | (1u << 10) | (1u << 25), 0) ||
  	    ud_epcmd(1, DEPCMD_SETTRANSFRESOURCE, 1, 0, 0)) {
  		printf("SWEET USB: endpoint 0 setup failed\n");
@@ -631,7 +1006,7 @@ index f29a6ba..e4e5bec 100644
  	}
  	dwc_wr(DALEPENA, 0x3);
  	ud_start_setup();
-@@ -1131,13 +1578,6 @@ sweet_usb_gadget_start(vm_offset_t dwc)
+@@ -1131,13 +1946,6 @@ sweet_usb_gadget_start(vm_offset_t dwc)
  		delay(1000);
  	}
  	printf("SWEET USB: running (DSTS 0x%08x after %d ms), DMA at 0x%llx\n", dwc_rd(DSTS), i, ud.dma_pa);
