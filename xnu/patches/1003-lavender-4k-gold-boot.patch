@@ -1,0 +1,19 @@
+diff --git a/iokit/Kernel/arm/SweetCPU.cpp b/iokit/Kernel/arm/SweetCPU.cpp
+index 29d76a5..0978968 100644
+--- a/iokit/Kernel/arm/SweetCPU.cpp
++++ b/iokit/Kernel/arm/SweetCPU.cpp
+@@ -149,8 +149,12 @@ SweetCPU::startAll(void *arg __unused, wait_result_t result __unused)
+ 	 * on gold CPU 0x100 (the silver cluster has no 16K granule).
+ 	 */
+ #if defined(TOPAZ_4K)
+-	/* lavender TOPAZ_4K: the shim boots xnu on silver CPU 0x0 (ADT lists the A53s) */
+-	const uint32_t boot_mpidr = 0x0;
++	/*
++	 * lavender TOPAZ_4K: the shim boots xnu on silver CPU 0x0 (ADT lists the A53s), or with
++	 * lv_gold= on gold CPU 0x100 at full clock (ADT mkadt_lavender.py --silver --gold4k lists
++	 * the A73s).
++	 */
++	const uint32_t boot_mpidr = topology->boot_cpu->phys_id == 0x100 ? 0x100 : 0x0;
+ #else
+ 	const uint32_t boot_mpidr = 0x100;
+ #endif
