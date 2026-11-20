@@ -1,5 +1,5 @@
 diff --git a/bsd/dev/sweet_usb.c b/bsd/dev/sweet_usb.c
-index f29a6ba..c002705 100644
+index f29a6ba..0e1c100 100644
 --- a/bsd/dev/sweet_usb.c
 +++ b/bsd/dev/sweet_usb.c
 @@ -205,6 +205,11 @@ static struct {
@@ -133,7 +133,7 @@ index f29a6ba..c002705 100644
  }
  
  /*
-@@ -579,11 +644,86 @@ ud_rx_arm(void)
+@@ -579,11 +644,200 @@ ud_rx_arm(void)
   *   "lv:reboot"    PSCI SYSTEM_RESET
   *   "lv:poweroff"  PSCI SYSTEM_OFF
   */
@@ -204,6 +204,120 @@ index f29a6ba..c002705 100644
 +	printf("SWEET USB: shot %ux%u %s\n", ow, oh, ok ? "sent" : "FAILED");
 +}
 +
++/*
++ * lavender: the PM660's PON block over SPMI, for "reboot bootloader" the way Linux does it
++ * (msm-poweroff.c + qpnp-power-on.c): restart reason BOOTLOADER in PON SOFT_RB_SPARE, PS_HOLD
++ * reset type WARM (IMEM restart_reason survives too), then PS_HOLD dropped. The TZ has PSCI
++ * 1.0 only: its SYSTEM_RESET is cold and the phone booted MIUI.
++ * SDM660 PMIC arbiter v2/v3 (DT qcom,spmi@800f000): core 0x800f000, chnls 0x8400000,
++ * obsrvr 0x9400000, cnfg 0x800a000; channel = base + 0x8000 * APID (EE 0).
++ */
++#define LV_SPMI_CORE    0x0800f000u
++#define LV_SPMI_CHNLS   0x08400000u
++#define LV_SPMI_OBSRVR  0x09400000u
++#define LV_SPMI_CNFG    0x0800a000u
++static vm_offset_t lv_spmi_core, lv_spmi_cnfg;
++
++static int
++lv_spmi_apid(unsigned ppid)
++{
++	int found = -1;
++
++	if (lv_spmi_core == 0) {
++		lv_spmi_core = ml_io_map(LV_SPMI_CORE, 0x1000);
++		lv_spmi_cnfg = ml_io_map(LV_SPMI_CNFG, 0x1000);
++	}
++	if (lv_spmi_core == 0 || lv_spmi_cnfg == 0) {
++		return -1;
++	}
++	for (unsigned i = 0; i < 512; i++) {
++		uint32_t map = *(volatile uint32_t *)(lv_spmi_core + 0x800 + 4 * i);
++		if (map == 0 || ((map >> 8) & 0xfff) != ppid) {
++			continue;
++		}
++		if (found < 0 || (*(volatile uint32_t *)(lv_spmi_cnfg + 0x700 + 4 * i) & 7) == 0) {
++			found = (int)i;
++		}
++	}
++	return found;
++}
++
++/* One byte at PMIC sid/addr: write (EXT_WRITEL on the channel) or read (EXT_READL on the observer). */
++static int
++lv_spmi_rw(bool write, unsigned sid, unsigned addr, uint8_t *val)
++{
++	int apid = lv_spmi_apid((sid << 8) | (addr >> 8));
++	if (apid < 0) {
++		return -1;
++	}
++	vm_offset_t ch = ml_io_map((write ? LV_SPMI_CHNLS : LV_SPMI_OBSRVR) + 0x8000u * (uint32_t)apid, 0x1000);
++	if (ch == 0) {
++		return -2;
++	}
++	if (write) {
++		*(volatile uint32_t *)(ch + 0x10) = *val;
++	}
++	__asm__ volatile ("dsb sy" ::: "memory");
++	*(volatile uint32_t *)(ch + 0x0) = ((write ? 0u : 1u) << 27) | ((addr & 0xffu) << 4);
++	__asm__ volatile ("dsb sy" ::: "memory");
++	for (int i = 0; i < 1000; i++) {
++		uint32_t st = *(volatile uint32_t *)(ch + 0x8);
++		if (st & 1) {
++			if (st & 0xe) {
++				return -(int)(st & 0xe);        /* failure / denied / dropped */
++			}
++			if (!write) {
++				*val = (uint8_t)*(volatile uint32_t *)(ch + 0x18);
++			}
++			return 0;
++		}
++		delay(1);
++	}
++	return -100;
++}
++
++static void
++lv_pon_dump(const char *why)
++{
++	uint8_t spare = 0, ctl = 0, ctl2 = 0;
++	int r1 = lv_spmi_rw(false, 0, 0x88f, &spare);
++	int r2 = lv_spmi_rw(false, 0, 0x85a, &ctl);
++	int r3 = lv_spmi_rw(false, 0, 0x85b, &ctl2);
++	printf("SWEET USB: PON %s: arb 0x%08x apid(0x008) %d owner %u; SOFT_RB_SPARE 0x%02x (%d) "
++	    "PS_HOLD_RST_CTL 0x%02x (%d) CTL2 0x%02x (%d)\n", why,
++	    lv_spmi_core ? *(volatile uint32_t *)lv_spmi_core : 0, lv_spmi_apid(0x008),
++	    lv_spmi_apid(0x008) >= 0 ? (*(volatile uint32_t *)(lv_spmi_cnfg + 0x700 + 4 * (uint32_t)lv_spmi_apid(0x008)) & 7) : 9,
++	    spare, r1, ctl, r2, ctl2, r3);
++}
++
++/* Restart reason BOOTLOADER, warm PS_HOLD reset; true if every write went through. */
++static bool
++lv_pon_bootloader(void)
++{
++	uint8_t v = 0;
++	int r = lv_spmi_rw(false, 0, 0x88f, &v);
++	if (r == 0) {
++		v = (uint8_t)((v & 1) | (1u << 1));     /* PON_RESTART_REASON_BOOTLOADER << 1 (gen2) */
++		r = lv_spmi_rw(true, 0, 0x88f, &v);
++	}
++	if (r == 0 && lv_spmi_rw(false, 0, 0x85b, &v) == 0) {
++		v &= (uint8_t)~0x80;                    /* reset disabled while the type changes */
++		r = lv_spmi_rw(true, 0, 0x85b, &v);
++		delay(500);
++		if (r == 0 && lv_spmi_rw(false, 0, 0x85a, &v) == 0) {
++			v = (uint8_t)((v & ~0x0f) | 0x01);  /* PON_POWER_OFF_WARM_RESET */
++			r = lv_spmi_rw(true, 0, 0x85a, &v);
++		}
++		if (r == 0 && lv_spmi_rw(false, 0, 0x85b, &v) == 0) {
++			v |= 0x80;
++			r = lv_spmi_rw(true, 0, 0x85b, &v);
++		}
++		delay(500);
++	}
++	lv_pon_dump(r == 0 ? "set for fastboot" : "write FAILED");
++	return r == 0;
++}
++
 +static uint64_t
 +ud_psci2(uint64_t fn, uint64_t a1, uint64_t a2)
  {
@@ -222,22 +336,25 @@ index f29a6ba..c002705 100644
  }
  
  static bool
-@@ -596,10 +736,41 @@ ud_w_command(const char *buf, uint32_t len)
+@@ -596,10 +850,47 @@ ud_w_command(const char *buf, uint32_t len)
  			*(volatile uint32_t *)(imem + 0x65c) = 0x77665500;
  			__asm__ volatile ("dsb sy" ::: "memory");
  		}
+-		delay(200000);
 +		/*
 +		 * lavender: PSCI SYSTEM_RESET is a cold reset that clears IMEM, and the phone booted
 +		 * MIUI. A warm reset keeps restart_reason: PSCI 1.1 SYSTEM_RESET2 (reset type 0 =
 +		 * SYSTEM_WARM_RESET), if the TZ has it (PSCI_FEATURES).
 +		 */
-+		uint64_t feat = ud_psci2(0x8400000a, 0xc4000012, 0);
-+		uint64_t ver = ud_psci2(0x84000000, 0, 0);
-+		printf("SWEET USB: PSCI version 0x%llx, SYSTEM_RESET2 features 0x%llx\n", ver, feat);
- 		delay(200000);
-+		if ((int64_t)(int32_t)feat >= 0) {
-+			(void)ud_psci2(0xc4000012, 0, 0);
-+			printf("SWEET USB: SYSTEM_RESET2 returned\n");
++		bool pon = lv_pon_bootloader();
++		delay(300000);                  /* (the log above goes out first) */
++		if (pon) {
++			vm_offset_t ps = ml_io_map(0x010ac000, 0x1000);     /* DT restart@10ac000 pshold-base */
++			if (ps != 0) {
++				*(volatile uint32_t *)ps = 0;               /* PS_HOLD low: the PMIC warm-resets */
++				__asm__ volatile ("dsb sy" ::: "memory");
++				delay(2000000);
++			}
 +		}
  		ud_psci(0x84000009);
  		return true;
@@ -256,6 +373,10 @@ index f29a6ba..c002705 100644
 +		}
 +		return true;
 +	}
++	if (len >= 6 && memcmp(buf, "lv:pon", 6) == 0) {            /* lavender: PON registers, no change */
++		lv_pon_dump("now");
++		return true;
++	}
 +	if (len >= 7 && memcmp(buf, "lv:psci", 7) == 0) {          /* lavender: what the TZ offers */
 +		printf("SWEET USB: PSCI version 0x%llx, SYSTEM_RESET2 0x%llx, SYSTEM_SUSPEND 0x%llx\n", ud_psci2(0x84000000, 0, 0),
 +		    ud_psci2(0x8400000a, 0xc4000012, 0), ud_psci2(0x8400000a, 0xc400000e, 0));
@@ -264,7 +385,7 @@ index f29a6ba..c002705 100644
  	if (len >= 9 && memcmp(buf, "lv:reboot", 9) == 0) {
  		printf("SWEET USB: command: reboot\n");
  		delay(200000);
-@@ -771,7 +942,10 @@ ud_tx_kick_locked(void)
+@@ -771,7 +1062,10 @@ ud_tx_kick_locked(void)
  		}
  		ud.tx_busy = true;
  		ud.tx_frames++;
@@ -276,7 +397,7 @@ index f29a6ba..c002705 100644
  	}
  }
  
-@@ -897,7 +1071,22 @@ ud_event(uint32_t ev)
+@@ -897,7 +1191,22 @@ ud_event(uint32_t ev)
  		uint32_t type = (ev >> 8) & 0xf;
  		if (type == 1) {        /* USB reset */
  			dwc_wr(DCFG, dwc_rd(DCFG) & ~(0x7fu << 3));
@@ -300,7 +421,7 @@ index f29a6ba..c002705 100644
  		} else if (type == 2) { /* connect done */
  			uint32_t speed = dwc_rd(DSTS) & 7;
  			/* ep0 max packet: 64 at high/full speed (modify action) */
-@@ -907,6 +1096,7 @@ ud_event(uint32_t ev)
+@@ -907,6 +1216,7 @@ ud_event(uint32_t ev)
  			    (1u << 8) | (1u << 10) | (1u << 25), 0);
  			printf("SWEET USB: connected, speed %u\n", speed);
  		} else if (type == 0) {
@@ -308,7 +429,7 @@ index f29a6ba..c002705 100644
  			printf("SWEET USB: disconnect\n");
  		}
  		return;
-@@ -915,7 +1105,11 @@ ud_event(uint32_t ev)
+@@ -915,7 +1225,11 @@ ud_event(uint32_t ev)
  	unsigned type = (ev >> 6) & 0xf;
  	unsigned status = (ev >> 12) & 0xf;
  
@@ -320,7 +441,7 @@ index f29a6ba..c002705 100644
  		ud_rx_done();
  		return;
  	}
-@@ -961,6 +1155,51 @@ ud_event(uint32_t ev)
+@@ -961,6 +1275,51 @@ ud_event(uint32_t ev)
  	}
  }
  
@@ -372,7 +493,7 @@ index f29a6ba..c002705 100644
  static void
  ud_thread(void *arg __unused, wait_result_t wr __unused)
  {
-@@ -972,13 +1211,19 @@ ud_thread(void *arg __unused, wait_result_t wr __unused)
+@@ -972,13 +1331,19 @@ ud_thread(void *arg __unused, wait_result_t wr __unused)
  			for (uint32_t done = 0; done < count; done += 4) {
  				uint32_t ev = *(volatile uint32_t *)(ud.dma + UD_EVT + ud.evt_pos);
  				ud.evt_pos = (ud.evt_pos + 4) % UD_EVT_SIZE;
@@ -393,7 +514,7 @@ index f29a6ba..c002705 100644
  		if ((++ticks % 30000) == 0) {
  			printf("SWEET USB: ue0 rx %llu tx %llu frames\n", ud.rx_frames, ud.tx_frames);
  		}
-@@ -1013,6 +1258,10 @@ ud_log_thread(void *arg __unused, wait_result_t wr __unused)
+@@ -1013,6 +1378,10 @@ ud_log_thread(void *arg __unused, wait_result_t wr __unused)
  				ud_sleep_ms(50);
  				continue;
  			}
@@ -404,7 +525,7 @@ index f29a6ba..c002705 100644
  			if (pending == 0) {
  				pending = sweet_log_copy(&pos, chunk, sizeof(chunk) - 1);
  				if (pending != 0 && (pending % 512) == 0) {
-@@ -1077,8 +1326,26 @@ sweet_usb_gadget_start(vm_offset_t dwc)
+@@ -1077,8 +1446,26 @@ sweet_usb_gadget_start(vm_offset_t dwc)
  	} else {
  		ud_if_create();
  	}
@@ -432,7 +553,7 @@ index f29a6ba..c002705 100644
  	dwc_wr(DCTL, DCTL_CSFTRST);
  	int i;
  	for (i = 0; i < 500 && (dwc_rd(DCTL) & DCTL_CSFTRST); i++) {
-@@ -1087,7 +1354,7 @@ sweet_usb_gadget_start(vm_offset_t dwc)
+@@ -1087,7 +1474,7 @@ sweet_usb_gadget_start(vm_offset_t dwc)
  	printf("SWEET USB: soft reset %s after %d ms, GCTL 0x%08x DCFG 0x%08x\n",
  	    (dwc_rd(DCTL) & DCTL_CSFTRST) ? "STUCK" : "done", i, dwc_rd(GCTL), dwc_rd(DCFG));
  	if (dwc_rd(DCTL) & DCTL_CSFTRST) {
@@ -441,7 +562,7 @@ index f29a6ba..c002705 100644
  	}
  
  	dwc_wr(GEVNTADRLO, (uint32_t)(ud.dma_pa + UD_EVT));
-@@ -1109,7 +1376,7 @@ sweet_usb_gadget_start(vm_offset_t dwc)
+@@ -1109,7 +1496,7 @@ sweet_usb_gadget_start(vm_offset_t dwc)
  	    ud_epcmd(1, DEPCMD_SETEPCONFIG, (0u << 1) | (512u << 3), (1u << 8) | (1u << 10) | (1u << 25), 0) ||
  	    ud_epcmd(1, DEPCMD_SETTRANSFRESOURCE, 1, 0, 0)) {
  		printf("SWEET USB: endpoint 0 setup failed\n");
@@ -450,7 +571,7 @@ index f29a6ba..c002705 100644
  	}
  	dwc_wr(DALEPENA, 0x3);
  	ud_start_setup();
-@@ -1131,13 +1398,6 @@ sweet_usb_gadget_start(vm_offset_t dwc)
+@@ -1131,13 +1518,6 @@ sweet_usb_gadget_start(vm_offset_t dwc)
  		delay(1000);
  	}
  	printf("SWEET USB: running (DSTS 0x%08x after %d ms), DMA at 0x%llx\n", dwc_rd(DSTS), i, ud.dma_pa);
