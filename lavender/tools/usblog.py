@@ -219,6 +219,11 @@ def main():
         # No read timeout: WinUSB cancels a timed-out read and resets the pipe, which used to stall the
         # phone's endpoint. Reads block; commands go from a thread of their own (one handle, two pipes).
         print('usblog: connected', flush=True)
+        try:
+            if time.time() - os.path.getmtime(CMD_QUEUE) > 20:
+                os.remove(CMD_QUEUE)    # stale commands from the phone's previous boot (one hung a boot)
+        except OSError:
+            pass
         buf = ctypes.create_string_buffer(65536)
         n = wt.ULONG(0)
         alive = [True]
@@ -254,6 +259,10 @@ def main():
                     w = wt.ULONG(0)
                     okw = winusb.WinUsb_WritePipe(hu, 0x01, msg, len(msg), ctypes.byref(w), None)
                     f.write(('\n[usblog] sent %s %s\n' % (msg.decode(), 'ok' if okw else 'FAILED error %d' % ctypes.get_last_error())).encode())
+                    if not okw:             # the link is being reset: send it again after the reconnect
+                        with open(CMD_QUEUE, 'a', encoding='utf-8') as q:
+                            q.write(c + '\n')
+                        break
                 time.sleep(0.1)
 
         threading.Thread(target=sender, daemon=True).start()

@@ -1,5 +1,5 @@
 diff --git a/bsd/dev/sweet_usb.c b/bsd/dev/sweet_usb.c
-index f29a6ba..e93c210 100644
+index f29a6ba..e4846ef 100644
 --- a/bsd/dev/sweet_usb.c
 +++ b/bsd/dev/sweet_usb.c
 @@ -15,6 +15,20 @@
@@ -1061,7 +1061,7 @@ index f29a6ba..e93c210 100644
 +	bool tx_stuck, reset_dead;
 +
 +	nanoseconds_to_absolutetime(10 * NSEC_PER_SEC, &s10);
-+	nanoseconds_to_absolutetime(2 * NSEC_PER_SEC, &s2);
++	nanoseconds_to_absolutetime(300 * NSEC_PER_MSEC, &s2);     /* (2 s: Windows said "not recognized" first) */
 +	tx_stuck = ud_winusb() && ud.configured && ud.tx_busy && now - ud.tx_since > s10;
 +	reset_dead = ud.reset_at != 0 && now - ud.reset_at > s2;
 +	if (!tx_stuck && !reset_dead) {
@@ -1071,7 +1071,7 @@ index f29a6ba..e93c210 100644
 +	volatile uint32_t *tt = (volatile uint32_t *)(ud.dma + UD_TRB_TX);
 +	volatile uint32_t *t0 = (volatile uint32_t *)(ud.dma + UD_TRB_OUT);
 +	printf("SWEET USB: BLACKBOX %s: restart %u, ep0 state %u, tx_busy %d rx_active %d, tx %llu rx %llu, "
-+	    "events %u evt_pos 0x%x GEVNTCOUNT %u\n", tx_stuck ? "TX stuck 10 s" : "no SETUP 2 s after reset",
++	    "events %u evt_pos 0x%x GEVNTCOUNT %u\n", tx_stuck ? "TX stuck 10 s" : "no SETUP 0.3 s after reset",
 +	    ud.restarts, ud.state, ud.tx_busy, ud.rx_active, ud.tx_frames, ud.rx_frames, ud.events, ud.evt_pos,
 +	    dwc_rd(GEVNTCOUNT) & 0xffff);
 +	printf("SWEET USB: BLACKBOX DSTS 0x%08x DCTL 0x%08x DCFG 0x%08x GSTS 0x%08x GCTL 0x%08x GUSB2PHYCFG 0x%08x "
