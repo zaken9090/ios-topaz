@@ -1,8 +1,8 @@
 diff --git a/bsd/dev/sweet_usb.c b/bsd/dev/sweet_usb.c
-index f29a6ba..2112796 100644
+index f29a6ba..e93c210 100644
 --- a/bsd/dev/sweet_usb.c
 +++ b/bsd/dev/sweet_usb.c
-@@ -15,6 +15,15 @@
+@@ -15,6 +15,20 @@
  #include <sys/systm.h>
  #include <kern/clock.h>
  #include <kern/thread.h>
@@ -14,11 +14,16 @@ index f29a6ba..2112796 100644
 +#include <kern/kalloc.h>
 +#include <machine/atomic.h>
 +#include <kern/backtrace.h>
++#include <sys/vnode.h>
++#include <sys/vnode_internal.h>
++#include <sys/fcntl.h>
++#include <sys/uio.h>
++#include <sys/mount.h>
 +#include <mach/vm_param.h>
  #include <kern/sched_prim.h>
  #include <machine/machine_routines.h>
  #include <arm/caches_internal.h>
-@@ -205,6 +214,11 @@ static struct {
+@@ -205,6 +219,11 @@ static struct {
  	mbuf_t      txq[UD_TXQ];
  	unsigned    txq_head, txq_count;
  	bool        tx_busy;
@@ -30,7 +35,7 @@ index f29a6ba..2112796 100644
  	uint64_t    rx_frames, tx_frames;
  } ud;
  
-@@ -260,7 +274,7 @@ ud_epcmd(unsigned ep, uint32_t cmd, uint32_t p0, uint32_t p1, uint32_t p2)
+@@ -260,7 +279,7 @@ ud_epcmd(unsigned ep, uint32_t cmd, uint32_t p0, uint32_t p1, uint32_t p2)
  }
  
  /* One TRB (at DMA offset trb) on physical endpoint ep. */
@@ -39,7 +44,7 @@ index f29a6ba..2112796 100644
  ud_start_trb(unsigned ep, uint32_t trb, uint32_t buf, uint32_t len, uint32_t ctl)
  {
  	volatile uint32_t *t = (volatile uint32_t *)(ud.dma + trb);
-@@ -275,7 +289,7 @@ ud_start_trb(unsigned ep, uint32_t trb, uint32_t buf, uint32_t len, uint32_t ctl
+@@ -275,7 +294,7 @@ ud_start_trb(unsigned ep, uint32_t trb, uint32_t buf, uint32_t len, uint32_t ctl
  		ud_sync(buf, len);
  	}
  	uint64_t tpa = ud.dma_pa + trb;
@@ -48,7 +53,7 @@ index f29a6ba..2112796 100644
  }
  
  static void
-@@ -426,15 +440,20 @@ ud_w_send(const char *buf, uint32_t len)
+@@ -426,15 +445,20 @@ ud_w_send(const char *buf, uint32_t len)
  	if (ud.configured && !ud.tx_busy && len > 0 && len < UD_FRAME_MAX) {
  		memcpy((void *)(ud.dma + UD_TX), buf, len);
  		ud.tx_busy = true;
@@ -71,7 +76,7 @@ index f29a6ba..2112796 100644
  static void ud_tx_kick_locked(void);
  
  /* NETWORK_CONNECTION notification: the host brings its link up on it. */
-@@ -486,6 +505,7 @@ ud_setup(void)
+@@ -486,6 +510,7 @@ ud_setup(void)
  	bool ok = true;
  
  	printf("SWEET USB: setup %02x %02x %04x %04x len %u\n", type, req, value, index, length);
@@ -79,7 +84,7 @@ index f29a6ba..2112796 100644
  	ud.data_in = (type & 0x80) != 0;
  	if ((type & 0x60) == 0x20) {    /* class request (e.g. SET_ETHERNET_PACKET_FILTER) */
  		ok = (length == 0);
-@@ -540,6 +560,30 @@ ud_setup(void)
+@@ -540,6 +565,30 @@ ud_setup(void)
  		}
  	} else if (req == 10) {         /* GET_INTERFACE */
  		data[0] = index == 1 ? ud.data_alt : 0; n = 1;
@@ -110,7 +115,7 @@ index f29a6ba..2112796 100644
  	} else if (req == 1 || req == 3) { /* CLEAR/SET_FEATURE (halt, remote wakeup) */
  	} else {
  		ok = false;
-@@ -568,7 +612,37 @@ ud_setup(void)
+@@ -568,7 +617,37 @@ ud_setup(void)
  static void
  ud_rx_arm(void)
  {
@@ -149,7 +154,7 @@ index f29a6ba..2112796 100644
  }
  
  /*
-@@ -579,11 +653,674 @@ ud_rx_arm(void)
+@@ -579,11 +658,767 @@ ud_rx_arm(void)
   *   "lv:reboot"    PSCI SYSTEM_RESET
   *   "lv:poweroff"  PSCI SYSTEM_OFF
   */
@@ -808,6 +813,99 @@ index f29a6ba..2112796 100644
 +	return true;
 +}
 +
++/*
++ * lavender: "lv:put SIZE PATH" - the next SIZE bytes on bulk OUT are a file for PATH (at most
++ * 64 MB): the old file is unlinked first (a process that has it mapped keeps the old one), the
++ * new one written and synced from a thread of its own. tools/usblog.py --put LOCAL PATH.
++ */
++extern int unlink1(vfs_context_t ctx, vnode_t start_dvp, user_addr_t path_arg, enum uio_seg segflg, int unlink_flags);
++static char *ud_put_buf;
++static uint32_t ud_put_size, ud_put_have;
++static char ud_put_path[256];
++static volatile bool ud_put_on, ud_put_writing;
++
++static void
++ud_put_thread(void *arg __unused, wait_result_t wr __unused)
++{
++	vfs_context_t ctx = vfs_context_kernel();
++	vnode_t vp = NULLVP;
++	int resid = 0, err;
++
++	err = unlink1(ctx, NULLVP, CAST_USER_ADDR_T(ud_put_path), UIO_SYSSPACE, 0);
++	int uerr = err;
++	err = vnode_open(ud_put_path, O_CREAT | O_TRUNC | FWRITE, 0755, 0, &vp, ctx);
++	if (err == 0) {
++		err = vn_rdwr(UIO_WRITE, vp, ud_put_buf, (int)ud_put_size, 0, UIO_SYSSPACE, IO_NOAUTH | IO_UNIT,
++		    vfs_context_ucred(ctx), &resid, vfs_context_proc(ctx));
++		if (err == 0) {
++			err = VNOP_FSYNC(vp, MNT_WAIT, ctx);
++		}
++		vnode_close(vp, FWRITE, ctx);
++	}
++	printf("SWEET USB: put %s: %u bytes, unlink %d, write %d, resid %d\n", ud_put_path, ud_put_size, uerr, err, resid);
++	kfree_data(ud_put_buf, ud_put_size);
++	ud_put_buf = NULL;
++	ud_put_writing = false;
++}
++
++/* bulk OUT data while a put is on: true if it was taken */
++static bool
++ud_put_data(const char *buf, uint32_t len)
++{
++	thread_t th;
++
++	if (!ud_put_on) {
++		return false;
++	}
++	uint32_t take = len < ud_put_size - ud_put_have ? len : ud_put_size - ud_put_have;
++	memcpy(ud_put_buf + ud_put_have, buf, take);
++	ud_put_have += take;
++	if (ud_put_have >= ud_put_size) {
++		ud_put_on = false;
++		ud_put_writing = true;
++		if (kernel_thread_start(ud_put_thread, NULL, &th) == KERN_SUCCESS) {
++			thread_deallocate(th);
++		} else {
++			ud_put_writing = false;
++		}
++	}
++	return true;
++}
++
++static bool
++ud_w_put_command(const char *buf, uint32_t len)
++{
++	char line[300];
++	uint32_t size = 0, i = 7;
++
++	if (len < 9 || len >= sizeof(line) || memcmp(buf, "lv:put ", 7) != 0) {
++		return false;
++	}
++	memcpy(line, buf, len);
++	line[len] = 0;
++	while (line[i] >= '0' && line[i] <= '9') {
++		size = size * 10 + (uint32_t)(line[i++] - '0');
++	}
++	while (line[i] == ' ') {
++		i++;
++	}
++	if (ud_put_on || ud_put_writing || size == 0 || size > (64u << 20) || line[i] != '/') {
++		printf("SWEET USB: put refused (size %u, busy %d)\n", size, ud_put_on || ud_put_writing);
++		return true;
++	}
++	strlcpy(ud_put_path, line + i, sizeof(ud_put_path));
++	ud_put_buf = (char *)kalloc_data(size, Z_WAITOK);
++	if (ud_put_buf == NULL) {
++		printf("SWEET USB: put: no memory for %u bytes\n", size);
++		return true;
++	}
++	ud_put_size = size;
++	ud_put_have = 0;
++	ud_put_on = true;
++	printf("SWEET USB: put %s: waiting for %u bytes\n", ud_put_path, size);
++	return true;
++}
++
 +static uint64_t
 +ud_psci2(uint64_t fn, uint64_t a1, uint64_t a2)
  {
@@ -826,7 +924,7 @@ index f29a6ba..2112796 100644
  }
  
  static bool
-@@ -596,10 +1333,50 @@ ud_w_command(const char *buf, uint32_t len)
+@@ -596,10 +1431,51 @@ ud_w_command(const char *buf, uint32_t len)
  			*(volatile uint32_t *)(imem + 0x65c) = 0x77665500;
  			__asm__ volatile ("dsb sy" ::: "memory");
  		}
@@ -863,7 +961,8 @@ index f29a6ba..2112796 100644
 +		}
 +		return true;
 +	}
-+	if (ud_w_key_command(buf, len) || ud_w_prof_command(buf, len) || ud_w_peek_command(buf, len)) {
++	if (ud_w_key_command(buf, len) || ud_w_prof_command(buf, len) || ud_w_peek_command(buf, len) ||
++	    ud_w_put_command(buf, len)) {
 +		return true;
 +	}
 +	if (len >= 6 && memcmp(buf, "lv:pon", 6) == 0) {            /* lavender: PON registers, no change */
@@ -878,7 +977,18 @@ index f29a6ba..2112796 100644
  	if (len >= 9 && memcmp(buf, "lv:reboot", 9) == 0) {
  		printf("SWEET USB: command: reboot\n");
  		delay(200000);
-@@ -771,7 +1548,10 @@ ud_tx_kick_locked(void)
+@@ -714,6 +1590,10 @@ ud_rx_done(void)
+ 	ud_sync(UD_TRB_RX, 16);
+ 	uint32_t len = UD_FRAME_MAX - (t[2] & 0xffffff);
+ 	ud_sync(UD_RX, UD_FRAME_MAX);
++	if (ud_winusb() && ud_put_data((const char *)(ud.dma + UD_RX), len)) {
++		ud_rx_arm();
++		return;
++	}
+ 	if (ud_winusb()) {
+ 		if (!ud_w_command((const char *)(ud.dma + UD_RX), len)) {
+ 			(void)ud_w_touch_command((const char *)(ud.dma + UD_RX), len);
+@@ -771,7 +1651,10 @@ ud_tx_kick_locked(void)
  		}
  		ud.tx_busy = true;
  		ud.tx_frames++;
@@ -890,7 +1000,7 @@ index f29a6ba..2112796 100644
  	}
  }
  
-@@ -897,7 +1677,22 @@ ud_event(uint32_t ev)
+@@ -897,7 +1780,22 @@ ud_event(uint32_t ev)
  		uint32_t type = (ev >> 8) & 0xf;
  		if (type == 1) {        /* USB reset */
  			dwc_wr(DCFG, dwc_rd(DCFG) & ~(0x7fu << 3));
@@ -914,7 +1024,7 @@ index f29a6ba..2112796 100644
  		} else if (type == 2) { /* connect done */
  			uint32_t speed = dwc_rd(DSTS) & 7;
  			/* ep0 max packet: 64 at high/full speed (modify action) */
-@@ -907,6 +1702,7 @@ ud_event(uint32_t ev)
+@@ -907,6 +1805,7 @@ ud_event(uint32_t ev)
  			    (1u << 8) | (1u << 10) | (1u << 25), 0);
  			printf("SWEET USB: connected, speed %u\n", speed);
  		} else if (type == 0) {
@@ -922,7 +1032,7 @@ index f29a6ba..2112796 100644
  			printf("SWEET USB: disconnect\n");
  		}
  		return;
-@@ -915,7 +1711,11 @@ ud_event(uint32_t ev)
+@@ -915,7 +1814,11 @@ ud_event(uint32_t ev)
  	unsigned type = (ev >> 6) & 0xf;
  	unsigned status = (ev >> 12) & 0xf;
  
@@ -934,7 +1044,7 @@ index f29a6ba..2112796 100644
  		ud_rx_done();
  		return;
  	}
-@@ -961,6 +1761,51 @@ ud_event(uint32_t ev)
+@@ -961,6 +1864,51 @@ ud_event(uint32_t ev)
  	}
  }
  
@@ -986,7 +1096,7 @@ index f29a6ba..2112796 100644
  static void
  ud_thread(void *arg __unused, wait_result_t wr __unused)
  {
-@@ -972,13 +1817,19 @@ ud_thread(void *arg __unused, wait_result_t wr __unused)
+@@ -972,13 +1920,19 @@ ud_thread(void *arg __unused, wait_result_t wr __unused)
  			for (uint32_t done = 0; done < count; done += 4) {
  				uint32_t ev = *(volatile uint32_t *)(ud.dma + UD_EVT + ud.evt_pos);
  				ud.evt_pos = (ud.evt_pos + 4) % UD_EVT_SIZE;
@@ -1007,7 +1117,7 @@ index f29a6ba..2112796 100644
  		if ((++ticks % 30000) == 0) {
  			printf("SWEET USB: ue0 rx %llu tx %llu frames\n", ud.rx_frames, ud.tx_frames);
  		}
-@@ -1013,6 +1864,10 @@ ud_log_thread(void *arg __unused, wait_result_t wr __unused)
+@@ -1013,6 +1967,10 @@ ud_log_thread(void *arg __unused, wait_result_t wr __unused)
  				ud_sleep_ms(50);
  				continue;
  			}
@@ -1018,7 +1128,7 @@ index f29a6ba..2112796 100644
  			if (pending == 0) {
  				pending = sweet_log_copy(&pos, chunk, sizeof(chunk) - 1);
  				if (pending != 0 && (pending % 512) == 0) {
-@@ -1077,8 +1932,26 @@ sweet_usb_gadget_start(vm_offset_t dwc)
+@@ -1077,8 +2035,26 @@ sweet_usb_gadget_start(vm_offset_t dwc)
  	} else {
  		ud_if_create();
  	}
@@ -1046,7 +1156,7 @@ index f29a6ba..2112796 100644
  	dwc_wr(DCTL, DCTL_CSFTRST);
  	int i;
  	for (i = 0; i < 500 && (dwc_rd(DCTL) & DCTL_CSFTRST); i++) {
-@@ -1087,7 +1960,7 @@ sweet_usb_gadget_start(vm_offset_t dwc)
+@@ -1087,7 +2063,7 @@ sweet_usb_gadget_start(vm_offset_t dwc)
  	printf("SWEET USB: soft reset %s after %d ms, GCTL 0x%08x DCFG 0x%08x\n",
  	    (dwc_rd(DCTL) & DCTL_CSFTRST) ? "STUCK" : "done", i, dwc_rd(GCTL), dwc_rd(DCFG));
  	if (dwc_rd(DCTL) & DCTL_CSFTRST) {
@@ -1055,7 +1165,7 @@ index f29a6ba..2112796 100644
  	}
  
  	dwc_wr(GEVNTADRLO, (uint32_t)(ud.dma_pa + UD_EVT));
-@@ -1109,7 +1982,7 @@ sweet_usb_gadget_start(vm_offset_t dwc)
+@@ -1109,7 +2085,7 @@ sweet_usb_gadget_start(vm_offset_t dwc)
  	    ud_epcmd(1, DEPCMD_SETEPCONFIG, (0u << 1) | (512u << 3), (1u << 8) | (1u << 10) | (1u << 25), 0) ||
  	    ud_epcmd(1, DEPCMD_SETTRANSFRESOURCE, 1, 0, 0)) {
  		printf("SWEET USB: endpoint 0 setup failed\n");
@@ -1064,7 +1174,7 @@ index f29a6ba..2112796 100644
  	}
  	dwc_wr(DALEPENA, 0x3);
  	ud_start_setup();
-@@ -1131,13 +2004,6 @@ sweet_usb_gadget_start(vm_offset_t dwc)
+@@ -1131,13 +2107,6 @@ sweet_usb_gadget_start(vm_offset_t dwc)
  		delay(1000);
  	}
  	printf("SWEET USB: running (DSTS 0x%08x after %d ms), DMA at 0x%llx\n", dwc_rd(DSTS), i, ud.dma_pa);

@@ -162,6 +162,12 @@ def main():
     args = sys.argv[1:]
     if len(args) == 2 and args[0] == '--cmd':
         sys.exit(send_command(args[1]))
+    if len(args) == 3 and args[0] == '--put':
+        # --put LOCAL /PATH/ON/PHONE: the running reader sends it (kernel lv:put, xnu patch 1017)
+        with open(CMD_QUEUE, 'a', encoding='utf-8') as q:
+            q.write('@put %s\t%s\n' % (os.path.abspath(args[1]), args[2]))
+        print('usblog: queued', args[1], '->', args[2])
+        sys.exit(0)
     if args and args[0] == '--shot':
         # --shot PURPOSE [--build mNN] [--scale N]: screenshots/<build>_<date_time>_<purpose>.png
         purpose = args[1] if len(args) > 1 else 'screen'
@@ -229,6 +235,19 @@ def main():
                     except OSError:
                         cmds = []
                 for c in cmds:
+                    if c.startswith('@put '):
+                        local, remote = c[5:].split('\t', 1)
+                        data = open(local, 'rb').read()
+                        hdr = ('lv:put %d %s' % (len(data), remote)).encode()
+                        w = wt.ULONG(0)
+                        okw = winusb.WinUsb_WritePipe(hu, 0x01, hdr, len(hdr), ctypes.byref(w), None)
+                        time.sleep(0.2)
+                        for at in range(0, len(data), 16384):
+                            part = data[at:at + 16384]
+                            okw = okw and winusb.WinUsb_WritePipe(hu, 0x01, part, len(part), ctypes.byref(w), None)
+                        f.write(('\n[usblog] put %s -> %s (%d bytes) %s\n' % (local, remote, len(data),
+                                 'sent' if okw else 'FAILED error %d' % ctypes.get_last_error())).encode())
+                        continue
                     if '|' in c:                       # 'shot N|build|purpose': the name for the PNG
                         c, shot_meta[0], shot_meta[1] = (c.split('|') + ['', ''])[:3]
                     msg = ('lv:' + c).encode()
