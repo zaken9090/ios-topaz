@@ -1,0 +1,13 @@
+diff --git a/iokit/Kernel/arm/TopazAdreno.cpp b/iokit/Kernel/arm/TopazAdreno.cpp
+index 6195299..a630e7f 100644
+--- a/iokit/Kernel/arm/TopazAdreno.cpp
++++ b/iokit/Kernel/arm/TopazAdreno.cpp
+@@ -901,7 +901,7 @@ smmu_setup(void)
+ 	wr(smmu, SMMU_CB0 + 0x020, (uint32_t)l1.pa);
+ 	wr(smmu, SMMU_CB0 + 0x024, (uint32_t)(l1.pa >> 32));
+ 	wr(smmu, SMMU_CB0 + 0x030, tcr);                /* TCR: T0SZ 32, 4 KB, NC walks, EPD1 */
+-	wr(smmu, SMMU_CB0 + 0x010, 1);                  /* TCR2: PASize 36 bits */
++	wr(smmu, SMMU_CB0 + 0x010, 1u | (7u << 15));    /* TCR2: PASize 36 bits, SEP UPSTREAM (lavender: SEP 0 = bit 31 sent every VA from 0x80000000 up, our 0xF0000000 kernel buffers too, to the disabled TTBR1) */
+ 	wr(smmu, SMMU_CB0 + 0x038, 0x44);               /* MAIR0: attr0 = Normal non-cacheable */
+ 	wr(smmu, SMMU_CB0 + 0x03C, 0);
+ 	wr(smmu, SMMU_CB0 + 0x000, gpu_identity ? 0xE0 : 0x67);    /* SCTLR: M=0 pass-through, or CFIE CFRE AFE TRE M */
