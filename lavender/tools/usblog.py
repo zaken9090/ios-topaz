@@ -12,7 +12,7 @@ Writes everything to OUT.txt (default dump\\usblog-<time>.txt next to this repo'
 prints the lines (or only those with one of the --grep words) to the terminal. Waits for the
 phone and reconnects when it comes back.
 """
-import ctypes, ctypes.wintypes as wt, os, sys, time
+import ctypes, ctypes.wintypes as wt, os, sys, threading, time
 
 GUID_STR = '{8F6B4C2E-5A1D-4E7B-9C3A-2D6E1F0A7B55}'
 # WinUSB allows one open handle: a running reader sends the commands queued in this file
@@ -166,29 +166,35 @@ def main():
             kernel32.CloseHandle(hf)
             time.sleep(2)
             continue
-        timeout = wt.ULONG(200)
-        winusb.WinUsb_SetPipePolicy(hu, 0x81, 0x03, ctypes.sizeof(timeout), ctypes.byref(timeout))  # PIPE_TRANSFER_TIMEOUT
+        # No read timeout: WinUSB cancels a timed-out read and resets the pipe, which used to stall the
+        # phone's endpoint. Reads block; commands go from a thread of their own (one handle, two pipes).
         print('usblog: connected', flush=True)
         buf = ctypes.create_string_buffer(65536)
         n = wt.ULONG(0)
-        while True:
-            if os.path.exists(CMD_QUEUE):
-                try:
-                    with open(CMD_QUEUE, encoding='utf-8') as q:
-                        cmds = [c.strip() for c in q if c.strip()]
-                    os.remove(CMD_QUEUE)
-                except OSError:
-                    cmds = []
+        alive = [True]
+
+        def sender(hu=hu):
+            while alive[0]:
+                cmds = []
+                if os.path.exists(CMD_QUEUE):
+                    try:
+                        with open(CMD_QUEUE, encoding='utf-8') as q:
+                            cmds = [c.strip() for c in q if c.strip()]
+                        os.remove(CMD_QUEUE)
+                    except OSError:
+                        cmds = []
                 for c in cmds:
                     msg = ('lv:' + c).encode()
                     w = wt.ULONG(0)
                     okw = winusb.WinUsb_WritePipe(hu, 0x01, msg, len(msg), ctypes.byref(w), None)
                     f.write(('\n[usblog] sent %s %s\n' % (msg.decode(), 'ok' if okw else 'FAILED error %d' % ctypes.get_last_error())).encode())
+                time.sleep(0.1)
+
+        threading.Thread(target=sender, daemon=True).start()
+        while True:
             ok = winusb.WinUsb_ReadPipe(hu, 0x81, buf, len(buf), ctypes.byref(n), None)
             if not ok:
                 err = ctypes.get_last_error()
-                if err == 121:          # ERROR_SEM_TIMEOUT: nothing new
-                    continue
                 print('usblog: read error %d, reconnecting' % err, flush=True)
                 break
             data = buf.raw[:n.value].replace(b'\x00', b'')
@@ -201,6 +207,8 @@ def main():
                 s = ln.decode('utf-8', 'replace')
                 if grep is None or any(w in s for w in grep):
                     print(s, flush=True)
+        alive[0] = False
+        time.sleep(0.3)
         winusb.WinUsb_Free(hu)
         kernel32.CloseHandle(hf)
         time.sleep(1)

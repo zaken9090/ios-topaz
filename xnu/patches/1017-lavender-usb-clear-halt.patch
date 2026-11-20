@@ -1,8 +1,49 @@
 diff --git a/bsd/dev/sweet_usb.c b/bsd/dev/sweet_usb.c
-index f29a6ba..8508353 100644
+index f29a6ba..1981a4e 100644
 --- a/bsd/dev/sweet_usb.c
 +++ b/bsd/dev/sweet_usb.c
-@@ -540,6 +540,26 @@ ud_setup(void)
+@@ -205,6 +205,8 @@ static struct {
+ 	mbuf_t      txq[UD_TXQ];
+ 	unsigned    txq_head, txq_count;
+ 	bool        tx_busy;
++	bool        rx_active;      /* lavender: a transfer is armed on bulk OUT */
++	bool        rx_rearm;       /* lavender: arming it failed: ud_thread retries */
+ 	uint64_t    rx_frames, tx_frames;
+ } ud;
+ 
+@@ -260,7 +262,7 @@ ud_epcmd(unsigned ep, uint32_t cmd, uint32_t p0, uint32_t p1, uint32_t p2)
+ }
+ 
+ /* One TRB (at DMA offset trb) on physical endpoint ep. */
+-static void
++static int
+ ud_start_trb(unsigned ep, uint32_t trb, uint32_t buf, uint32_t len, uint32_t ctl)
+ {
+ 	volatile uint32_t *t = (volatile uint32_t *)(ud.dma + trb);
+@@ -275,7 +277,7 @@ ud_start_trb(unsigned ep, uint32_t trb, uint32_t buf, uint32_t len, uint32_t ctl
+ 		ud_sync(buf, len);
+ 	}
+ 	uint64_t tpa = ud.dma_pa + trb;
+-	ud_epcmd(ep, DEPCMD_STARTTRANSFER, (uint32_t)(tpa >> 32), (uint32_t)tpa, 0);
++	return ud_epcmd(ep, DEPCMD_STARTTRANSFER, (uint32_t)(tpa >> 32), (uint32_t)tpa, 0);
+ }
+ 
+ static void
+@@ -427,8 +429,11 @@ ud_w_send(const char *buf, uint32_t len)
+ 		memcpy((void *)(ud.dma + UD_TX), buf, len);
+ 		ud.tx_busy = true;
+ 		ud.tx_frames++;
+-		ud_start_trb(EP_TX, UD_TRB_TX, UD_TX, len, TRBCTL_NORMAL);
+-		sent = true;
++		if (ud_start_trb(EP_TX, UD_TRB_TX, UD_TX, len, TRBCTL_NORMAL) == 0) {
++			sent = true;
++		} else {
++			ud.tx_busy = false;     /* lavender: not started: the log thread tries again */
++		}
+ 	}
+ 	lck_mtx_unlock(ud.lock);
+ 	return sent;
+@@ -540,6 +545,30 @@ ud_setup(void)
  		}
  	} else if (req == 10) {         /* GET_INTERFACE */
  		data[0] = index == 1 ? ud.data_alt : 0; n = 1;
@@ -15,17 +56,106 @@ index f29a6ba..8508353 100644
 +		 */
 +		unsigned ep = (index & 0x80) ? EP_TX : ((index & 0x7f) == 1 ? EP_RX : 0);
 +		if (ep != 0 && ud.configured) {
-+			ud_epcmd(ep, 8 | (1u << 11), 0, 0, 0);          /* EndTransfer, ForceRM */
++			lck_mtx_lock(ud.lock);
++			if (ep == EP_RX ? ud.rx_active : ud.tx_busy) {
++				ud_epcmd(ep, 8 | (1u << 11), 0, 0, 0);  /* EndTransfer, ForceRM */
++				delay(100);                             /* (asynchronous: let it finish) */
++			}
 +			ud_epcmd(ep, 5, 0, 0, 0);                       /* ClearStall: sequence number 0 */
 +			if (ep == EP_RX) {
 +				ud_rx_arm();
 +			} else {
-+				lck_mtx_lock(ud.lock);
-+				ud.tx_busy = false;
++				ud.tx_busy = false;                     /* the log thread sends again */
 +				ud_tx_kick_locked();
-+				lck_mtx_unlock(ud.lock);
 +			}
++			lck_mtx_unlock(ud.lock);
++			printf("SWEET USB: clear halt ep%u\n", ep);
 +		}
  	} else if (req == 1 || req == 3) { /* CLEAR/SET_FEATURE (halt, remote wakeup) */
  	} else {
  		ok = false;
+@@ -568,7 +597,37 @@ ud_setup(void)
+ static void
+ ud_rx_arm(void)
+ {
+-	ud_start_trb(EP_RX, UD_TRB_RX, UD_RX, UD_FRAME_MAX, TRBCTL_NORMAL);
++	ud.rx_active = ud_start_trb(EP_RX, UD_TRB_RX, UD_RX, UD_FRAME_MAX, TRBCTL_NORMAL) == 0;
++	ud.rx_rearm = !ud.rx_active && ud.configured;
++}
++
++/*
++ * lavender: stop the bulk endpoints' transfers (EndTransfer, ForceRM) and forget the
++ * configuration, so the next SET_CONFIGURATION sets them up again (bus reset, disconnect:
++ * a cable plugged in again). EndTransfer is asynchronous: 100 us for it to finish before
++ * any StartTransfer, as Linux dwc3 waited.
++ */
++static void
++ud_unconfigure(void)
++{
++	if (!ud.configured || ud.lock == NULL) {
++		return;
++	}
++	lck_mtx_lock(ud.lock);
++	ud.configured = false;
++	if (ud.rx_active) {
++		ud_epcmd(EP_RX, 8 | (1u << 11), 0, 0, 0);
++	}
++	if (ud.tx_busy) {
++		ud_epcmd(EP_TX, 8 | (1u << 11), 0, 0, 0);
++	}
++	delay(100);
++	ud.rx_active = false;
++	ud.rx_rearm = false;
++	ud.tx_busy = false;
++	dwc_wr(DALEPENA, dwc_rd(DALEPENA) & ~((1u << EP_RX) | (1u << EP_TX) | (1u << EP_INT)));
++	lck_mtx_unlock(ud.lock);
++	printf("SWEET USB: unconfigured\n");
+ }
+ 
+ /*
+@@ -771,7 +830,10 @@ ud_tx_kick_locked(void)
+ 		}
+ 		ud.tx_busy = true;
+ 		ud.tx_frames++;
+-		ud_start_trb(EP_TX, UD_TRB_TX, UD_TX, (uint32_t)len, TRBCTL_NORMAL);
++		if (ud_start_trb(EP_TX, UD_TRB_TX, UD_TX, (uint32_t)len, TRBCTL_NORMAL) != 0) {
++			ud.tx_busy = false;
++			break;
++		}
+ 	}
+ }
+ 
+@@ -897,6 +959,7 @@ ud_event(uint32_t ev)
+ 		uint32_t type = (ev >> 8) & 0xf;
+ 		if (type == 1) {        /* USB reset */
+ 			dwc_wr(DCFG, dwc_rd(DCFG) & ~(0x7fu << 3));
++			ud_unconfigure();
+ 			printf("SWEET USB: bus reset\n");
+ 		} else if (type == 2) { /* connect done */
+ 			uint32_t speed = dwc_rd(DSTS) & 7;
+@@ -907,6 +970,7 @@ ud_event(uint32_t ev)
+ 			    (1u << 8) | (1u << 10) | (1u << 25), 0);
+ 			printf("SWEET USB: connected, speed %u\n", speed);
+ 		} else if (type == 0) {
++			ud_unconfigure();
+ 			printf("SWEET USB: disconnect\n");
+ 		}
+ 		return;
+@@ -916,6 +980,7 @@ ud_event(uint32_t ev)
+ 	unsigned status = (ev >> 12) & 0xf;
+ 
+ 	if (ep == EP_RX && type == 1) {
++		ud.rx_active = false;
+ 		ud_rx_done();
+ 		return;
+ 	}
+@@ -979,6 +1044,9 @@ ud_thread(void *arg __unused, wait_result_t wr __unused)
+ 			}
+ 			dwc_wr(GEVNTCOUNT, count);
+ 		}
++		if (ud.rx_rearm && ud.configured) {
++			ud_rx_arm();                    /* lavender: an earlier arm failed */
++		}
+ 		if ((++ticks % 30000) == 0) {
+ 			printf("SWEET USB: ue0 rx %llu tx %llu frames\n", ud.rx_frames, ud.tx_frames);
+ 		}
