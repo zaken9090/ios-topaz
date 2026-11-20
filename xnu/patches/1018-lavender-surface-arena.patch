@@ -1,4 +1,4 @@
-From 95a6a000a61684db0c88effcb6bd1b6bea9b1569 Mon Sep 17 00:00:00 2001
+From f174d2d101952146df8c4a825dd4bdbf6c6696aa Mon Sep 17 00:00:00 2001
 From: x <x@x>
 Date: Sat, 21 Nov 2026 01:05:05 +0200
 Subject: [PATCH] lavender: contiguous IOSurface arena (sweetsurf_arena=MB,
@@ -10,8 +10,8 @@ Subject: [PATCH] lavender: contiguous IOSurface arena (sweetsurf_arena=MB,
  iokit/Kernel/arm/RedwoodGPU.cpp   |   2 +-
  iokit/Kernel/arm/SweetSurface.cpp | 205 ++++++++++++++++++++++++++++++
  iokit/Kernel/arm/SweetSurface.h   |   4 +-
- iokit/Kernel/arm/TopazAdreno.cpp  |  27 ++++
- 4 files changed, 236 insertions(+), 2 deletions(-)
+ iokit/Kernel/arm/TopazAdreno.cpp  |  26 ++++
+ 4 files changed, 235 insertions(+), 2 deletions(-)
 
 diff --git a/iokit/Kernel/arm/RedwoodGPU.cpp b/iokit/Kernel/arm/RedwoodGPU.cpp
 index e124756..0f57df8 100644
@@ -294,7 +294,7 @@ index 5b74320..0f1533a 100644
  
  	/* Kernel address of the pixels (mapped on first use), or 0. */
 diff --git a/iokit/Kernel/arm/TopazAdreno.cpp b/iokit/Kernel/arm/TopazAdreno.cpp
-index b360186..06693ab 100644
+index b360186..db36d96 100644
 --- a/iokit/Kernel/arm/TopazAdreno.cpp
 +++ b/iokit/Kernel/arm/TopazAdreno.cpp
 @@ -1071,6 +1071,8 @@ hw_init_regs(void)
@@ -306,7 +306,7 @@ index b360186..06693ab 100644
  	gpu_wr(0xe96, 2);                               /* UCHE_CACHE_WAYS */
  	gpu_wr64(0xe89, 0x0001fffffffff000ull);         /* UCHE_TRAP_BASE */
  	gpu_wr64(0xe87, 0x0001fffffffff000ull);         /* UCHE_WRITE_THRU_BASE */
-@@ -1548,6 +1550,31 @@ topaz_osd_sampler(__unused void *param, __unused wait_result_t wr_)
+@@ -1548,6 +1550,30 @@ topaz_osd_sampler(__unused void *param, __unused wait_result_t wr_)
  		if (++samples >= 1000) {
  			topaz_osd_gpu_busy = busy * 100 / samples;
  			samples = busy = 0;
@@ -325,8 +325,7 @@ index b360186..06693ab 100644
 +					uint32_t mhz = (uint32_t)(dcp * 192 / dao / 10);
 +					uint32_t core = dcp ? (uint32_t)(dbz * 100 / dcp) : 0;
 +					if (topaz_osd_gpu_busy != 0 || core != 0) {
-+						IOLog("LVGPU clock %u MHz core busy %u%% (pending %u%%)
-+", mhz, core, topaz_osd_gpu_busy);
++						IOLog("LVGPU clock %u MHz core busy %u%% (pending %u%%)\n", mhz, core, topaz_osd_gpu_busy);
 +					}
 +				}
 +				if (secs % 5 == 0 || last_ao == 0) {
