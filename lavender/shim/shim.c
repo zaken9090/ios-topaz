@@ -1721,16 +1721,7 @@ static void cpu_diag_dump(void)
 	reg("OSM pwrcl 0x900 ", OSM_PWRCL + 0x900);
 	reg("efuse 0x784130  ", 0x784130UL);
 	reg("efuse 0x784134  ", 0x784134UL);
-	for (uint32_t o = 0x900; o < 0x980; o += 0x10) {
-		puts_("CPRH apc0 +");
-		puthex(o, 3);
-		puts_(": ");
-		for (uint32_t k = 0; k < 16; k += 4) {
-			puthex(rd32(0x179c8000UL + o + k), 8);
-			putc_(' ');
-		}
-		putc_('\n');
-	}
+	/* (CPRh apc0 at 0x179c8000 is not readable from EL1: synchronous external abort) */
 	puts_("silver ");
 	putdec((int64_t)gold_mhz());
 	puts_(" MHz now\n");
