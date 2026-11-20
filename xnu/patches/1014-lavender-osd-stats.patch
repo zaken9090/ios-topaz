@@ -30,7 +30,7 @@ index 19303a1..e124756 100644
  	for (uint32_t i = 0; i < request->nr_cmds; i++) {
  		struct gpu_buffer * b = cmds[i].submit_idx < request->nr_bos ? buffer(bos[cmds[i].submit_idx].handle) : NULL;
 diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
-index 9a20f08..f530298 100644
+index 9a20f08..b020bfc 100644
 --- a/iokit/Kernel/arm/SweetFramebuffer.cpp
 +++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
 @@ -775,6 +775,7 @@ get32(const uint8_t *p, uint32_t off)
@@ -41,7 +41,7 @@ index 9a20f08..f530298 100644
  static int sweet_osd_on = -1;
  static uint32_t sweet_osd_frames, sweet_osd_fps;
  static uint64_t sweet_osd_window;
-@@ -804,37 +805,75 @@ sweet_osd_count(void)
+@@ -804,44 +805,108 @@ sweet_osd_count(void)
  	absolutetime_to_nanoseconds(now - sweet_osd_window, &ns);
  	if (ns >= 1000000000ull) {
  		sweet_osd_fps = (uint32_t)((uint64_t)sweet_osd_frames * 1000000000ull / ns);
@@ -91,15 +91,21 @@ index 9a20f08..f530298 100644
  };
  
 -/* draw the number at (x, y) of a 32-bit surface whose row 0 / column 0 is at base */
-+/* one row: a letter (glyph 10..13) and a number up to 9999, green on black */
- static void
+-static void
 -sweet_osd_draw(uint8_t *base, uint32_t bpr, uint32_t x, uint32_t y)
-+sweet_osd_row(uint8_t *base, uint32_t bpr, uint32_t x, uint32_t y, unsigned letter, uint32_t v)
++static bool
++sweet_osd_on_cell(const uint8_t *g, int d, int r, int c)
  {
 -	enum { S = 5, W = 3 * 6 * S + 2 * S, H = 7 * S + 2 * S };
 -	uint32_t v = sweet_osd_fps > 999 ? 999 : sweet_osd_fps;
 -	uint8_t digits[3] = { (uint8_t)(v / 100), (uint8_t)(v / 10 % 10), (uint8_t)(v % 10) };
--
++	return r >= 0 && r < 7 && c >= 0 && c < 5 && g[d] != 0xff && (sweet_osd_font[g[d]][r] & (0x10 >> c));
++}
+ 
++/* one row: a letter (glyph 10..13) and a number up to 9999, green with a dark outline */
++static void
++sweet_osd_row(uint8_t *base, uint32_t bpr, uint32_t x, uint32_t y, unsigned letter, uint32_t v)
++{
 +	enum { S = 4, CW = 6 * S, W = 6 * CW + 2 * S, H = 7 * S + 2 * S };
 +	uint8_t g[6];
 +
@@ -114,23 +120,34 @@ index 9a20f08..f530298 100644
 +	for (int i = 2; i < 5 && g[i] == 0; i++) {
 +		g[i] = 0xff;
 +	}
++	/* transparent: only the glyphs' cells and a dark outline one cell around them are written */
  	for (uint32_t r = 0; r < H; r++) {
  		volatile uint32_t *row = (volatile uint32_t *)(base + (uint64_t)(y + r) * bpr) + x;
  		for (uint32_t c = 0; c < W; c++) {
 -			uint32_t px = 0xff000000;               /* black box */
-+			uint32_t px = 0xff000000;
- 			if (r >= S && r < S + 7 * S && c >= S) {
+-			if (r >= S && r < S + 7 * S && c >= S) {
 -				uint32_t d = (c - S) / (6 * S), dc = (c - S) % (6 * S) / S, dr = (r - S) / S;
 -				if (d < 3 && dc < 5 && (d != 0 || v >= 100) && (d != 1 || v >= 10) &&
 -				    (sweet_osd_font[digits[d]][dr] & (0x10 >> dc))) {
 -					px = 0xff00ff00;            /* green */
-+				uint32_t d = (c - S) / CW, dc = (c - S) % CW / S, dr = (r - S) / S;
-+				if (d < 6 && dc < 5 && g[d] != 0xff && (sweet_osd_font[g[d]][dr] & (0x10 >> dc))) {
-+					px = d == 0 ? 0xffffff00 : 0xff00ff00;      /* letter yellow, number green */
++			int cr = (int)r / S - 1, cc = (int)c / S - 1;    /* glyph-cell coordinates */
++			int d = cc >= 0 ? cc / 6 : -1, dc = cc >= 0 ? cc % 6 : -1;
++			bool on = d >= 0 && d < 6 && sweet_osd_on_cell(g, d, cr, dc);
++			bool near = false;
++			for (int nr = -1; nr <= 1 && !on && !near; nr++) {
++				for (int nc = -1; nc <= 1 && !near; nc++) {
++					int ccc = cc + nc;
++					int dd = ccc >= 0 ? ccc / 6 : -1, ddc = ccc >= 0 ? ccc % 6 : -1;
++					near = dd >= 0 && dd < 6 && sweet_osd_on_cell(g, dd, cr + nr, ddc);
  				}
  			}
- 			row[c] = px;
-@@ -842,6 +881,17 @@ sweet_osd_draw(uint8_t *base, uint32_t bpr, uint32_t x, uint32_t y)
+-			row[c] = px;
++			if (on) {
++				row[c] = d == 0 ? 0xffffff00 : 0xff00ff00;     /* letter yellow, number green */
++			} else if (near) {
++				row[c] = 0xff000000;                            /* outline */
++			}
+ 		}
  	}
  }
  
