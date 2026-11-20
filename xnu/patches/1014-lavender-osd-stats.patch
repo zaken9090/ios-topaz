@@ -30,7 +30,7 @@ index 19303a1..e124756 100644
  	for (uint32_t i = 0; i < request->nr_cmds; i++) {
  		struct gpu_buffer * b = cmds[i].submit_idx < request->nr_bos ? buffer(bos[cmds[i].submit_idx].handle) : NULL;
 diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
-index 9a20f08..b020bfc 100644
+index 9a20f08..e1ef9fa 100644
 --- a/iokit/Kernel/arm/SweetFramebuffer.cpp
 +++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
 @@ -775,6 +775,7 @@ get32(const uint8_t *p, uint32_t off)
@@ -41,7 +41,16 @@ index 9a20f08..b020bfc 100644
  static int sweet_osd_on = -1;
  static uint32_t sweet_osd_frames, sweet_osd_fps;
  static uint64_t sweet_osd_window;
-@@ -804,44 +805,108 @@ sweet_osd_count(void)
+@@ -784,7 +785,7 @@ sweet_osd_enabled(void)
+ {
+ 	if (sweet_osd_on < 0) {
+ 		uint32_t v = 0;
+-		sweet_osd_on = PE_parse_boot_argn("sweetfps_osd", &v, sizeof(v)) && v != 0;
++		sweet_osd_on = PE_parse_boot_argn("sweetfps_osd", &v, sizeof(v)) && v != 0 ? (int)v : 0;
+ 	}
+ 	return sweet_osd_on > 0;
+ }
+@@ -804,44 +805,131 @@ sweet_osd_count(void)
  	absolutetime_to_nanoseconds(now - sweet_osd_window, &ns);
  	if (ns >= 1000000000ull) {
  		sweet_osd_fps = (uint32_t)((uint64_t)sweet_osd_frames * 1000000000ull / ns);
@@ -59,11 +68,13 @@ index 9a20f08..b020bfc 100644
 + *   G  GPU busy: % of 1 ms samples with a submission not done yet (TopazAdreno.cpp)
 + *   C  ms of the last second spent pushing surfaces out of the CPU cache for the GPU (RedwoodGPU.cpp)
 + *   W  ms of the last second programs spent waiting for the GPU (fence/cpu-prep waits, RedwoodGPU.cpp)
++ *   T  hottest TSENS sensor, degC
 + */
 +extern "C" uint32_t topaz_osd_gpu_busy;         /* TopazAdreno.cpp */
 +extern "C" uint64_t redwood_osd_flush_abs;      /* RedwoodGPU.cpp: mach time spent pushing caches */
 +extern "C" uint64_t redwood_osd_wait_abs;       /* RedwoodGPU.cpp: mach time spent in GPU waits */
-+static uint32_t sweet_osd_c, sweet_osd_w;
++static uint32_t sweet_osd_c, sweet_osd_w, sweet_osd_t;
++static volatile uint32_t *sweet_tsens;
 +static uint64_t sweet_osd_last_flush, sweet_osd_last_wait;
 +
 +static void
@@ -75,12 +86,31 @@ index 9a20f08..b020bfc 100644
 +	absolutetime_to_nanoseconds(w - sweet_osd_last_wait, &wns);
 +	sweet_osd_last_flush = f;
 +	sweet_osd_last_wait = w;
++	/*
++	 * T: the hottest of the 14 TSENS sensors, degC (DT tsens@10ad000: SROT 0x10ad000, TM 0x10ae000;
++	 * v2 layout: TM_Sn_STATUS 0xa0 + 4n, LAST_TEMP bits 11:0 signed deci-degC, VALID bit 21)
++	 */
++	/* (only with sweetfps_osd=2: a register block EL1 may not read would panic) */
++	if (sweet_tsens == NULL && sweet_osd_on == 2) {
++		sweet_tsens = (volatile uint32_t *)ml_io_map(0x010ae000, 0x1000);
++	}
++	if (sweet_tsens != NULL) {
++		int32_t hot = -1000;
++		for (unsigned i = 0; i < 14; i++) {
++			uint32_t s = sweet_tsens[(0xa0 + 4 * i) / 4];
++			int32_t dc = (int32_t)(s << 20) >> 20;
++			if ((s & (1u << 21)) && dc > hot) {
++				hot = dc;
++			}
++		}
++		sweet_osd_t = hot > 0 ? (uint32_t)(hot / 10) : 0;
++	}
 +	sweet_osd_c = (uint32_t)(fns * 1000ull / (ns ? ns : 1));
 +	sweet_osd_w = (uint32_t)(wns * 1000ull / (ns ? ns : 1));
 +}
 +
-+/* 5x7 glyphs, a row per byte, bit 4 = leftmost: 0-9 then F G C W */
-+static const uint8_t sweet_osd_font[14][7] = {
++/* 5x7 glyphs, a row per byte, bit 4 = leftmost: 0-9 then F G C W T */
++static const uint8_t sweet_osd_font[15][7] = {
  	{ 0x0e, 0x11, 0x13, 0x15, 0x19, 0x11, 0x0e }, { 0x04, 0x0c, 0x04, 0x04, 0x04, 0x04, 0x0e },
  	{ 0x0e, 0x11, 0x01, 0x02, 0x04, 0x08, 0x1f }, { 0x1f, 0x02, 0x04, 0x02, 0x01, 0x11, 0x0e },
  	{ 0x02, 0x06, 0x0a, 0x12, 0x1f, 0x02, 0x02 }, { 0x1f, 0x10, 0x1e, 0x01, 0x01, 0x11, 0x0e },
@@ -88,6 +118,7 @@ index 9a20f08..b020bfc 100644
  	{ 0x0e, 0x11, 0x11, 0x0e, 0x11, 0x11, 0x0e }, { 0x0e, 0x11, 0x11, 0x0f, 0x01, 0x02, 0x0c },
 +	{ 0x1f, 0x10, 0x10, 0x1e, 0x10, 0x10, 0x10 }, { 0x0e, 0x11, 0x10, 0x17, 0x11, 0x11, 0x0f },
 +	{ 0x0e, 0x11, 0x10, 0x10, 0x10, 0x11, 0x0e }, { 0x11, 0x11, 0x11, 0x15, 0x15, 0x15, 0x0a },
++	{ 0x1f, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04 },
  };
  
 -/* draw the number at (x, y) of a 32-bit surface whose row 0 / column 0 is at base */
@@ -160,6 +191,7 @@ index 9a20f08..b020bfc 100644
 +	sweet_osd_row(base, bpr, x, y + step, 11, topaz_osd_gpu_busy);
 +	sweet_osd_row(base, bpr, x, y + 2 * step, 12, sweet_osd_c);
 +	sweet_osd_row(base, bpr, x, y + 3 * step, 13, sweet_osd_w);
++	sweet_osd_row(base, bpr, x, y + 4 * step, 14, sweet_osd_t);
 +}
 +
  static uint32_t sweet_fb_swaps_logged;
