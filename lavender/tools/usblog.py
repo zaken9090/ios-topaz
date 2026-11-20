@@ -12,7 +12,7 @@ Writes everything to OUT.txt (default dump\\usblog-<time>.txt next to this repo'
 prints the lines (or only those with one of the --grep words) to the terminal. Waits for the
 phone and reconnects when it comes back.
 """
-import ctypes, ctypes.wintypes as wt, os, sys, threading, time
+import ctypes, ctypes.wintypes as wt, os, struct, sys, threading, time, zlib
 
 GUID_STR = '{8F6B4C2E-5A1D-4E7B-9C3A-2D6E1F0A7B55}'
 # WinUSB allows one open handle: a running reader sends the commands queued in this file
@@ -100,6 +100,44 @@ def open_device(guid):
     return hf, hu
 
 
+HERE = os.path.dirname(os.path.abspath(__file__))
+SHOTS = os.path.normpath(os.path.join(HERE, '..', '..', '..', 'screenshots'))
+SHOT_MARK, SHOT_END = b'@@LVSHOT ', b'@@LVSHOT END@@'
+
+
+def save_png(path, w, h, rgb565):
+    """RGB565 little-endian -> 8-bit RGB PNG (no PIL needed)."""
+    rows = bytearray()
+    for y in range(h):
+        rows.append(0)
+        row = rgb565[y * w * 2:(y + 1) * w * 2]
+        for i in range(0, len(row), 2):
+            v = row[i] | row[i + 1] << 8
+            rows += bytes(((v >> 11) * 255 // 31, ((v >> 5) & 63) * 255 // 63, (v & 31) * 255 // 31))
+
+    def chunk(k, d):
+        return struct.pack('>I', len(d)) + k + d + struct.pack('>I', zlib.crc32(k + d) & 0xffffffff)
+    with open(path, 'wb') as o:
+        o.write(b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('>IIBBBBB', w, h, 8, 2, 0, 0, 0)) +
+                chunk(b'IDAT', zlib.compress(bytes(rows), 6)) + chunk(b'IEND', b''))
+
+
+def take_shot(purpose, build, scale):
+    """Queue 'lv:shot' for the running reader and wait for the PNG it saves."""
+    os.makedirs(SHOTS, exist_ok=True)
+    before = set(os.listdir(SHOTS))
+    with open(CMD_QUEUE, 'a', encoding='utf-8') as q:
+        q.write('shot %d|%s|%s\n' % (scale, build, purpose))
+    for _ in range(150):
+        time.sleep(0.1)
+        new = [x for x in set(os.listdir(SHOTS)) - before if x.endswith('.png')]
+        if new:
+            print(os.path.join(SHOTS, sorted(new)[-1]))
+            return 0
+    print('usblog: no screenshot came back (is a reader running and the phone up?)')
+    return 1
+
+
 def send_command(word):
     guid = guid_from_str(GUID_STR)
     hf, hu = open_device(guid)
@@ -124,6 +162,12 @@ def main():
     args = sys.argv[1:]
     if len(args) == 2 and args[0] == '--cmd':
         sys.exit(send_command(args[1]))
+    if args and args[0] == '--shot':
+        # --shot PURPOSE [--build mNN] [--scale N]: screenshots/<build>_<date_time>_<purpose>.png
+        purpose = args[1] if len(args) > 1 else 'screen'
+        build = args[args.index('--build') + 1] if '--build' in args else 'build'
+        scale = int(args[args.index('--scale') + 1]) if '--scale' in args else 3
+        sys.exit(take_shot(purpose, build, scale))
     grep, quiet, out = None, False, None
     i = 0
     while i < len(args):
@@ -172,6 +216,7 @@ def main():
         buf = ctypes.create_string_buffer(65536)
         n = wt.ULONG(0)
         alive = [True]
+        shot_meta = ['build', 'screen']
 
         def sender(hu=hu):
             while alive[0]:
@@ -184,6 +229,8 @@ def main():
                     except OSError:
                         cmds = []
                 for c in cmds:
+                    if '|' in c:                       # 'shot N|build|purpose': the name for the PNG
+                        c, shot_meta[0], shot_meta[1] = (c.split('|') + ['', ''])[:3]
                     msg = ('lv:' + c).encode()
                     w = wt.ULONG(0)
                     okw = winusb.WinUsb_WritePipe(hu, 0x01, msg, len(msg), ctypes.byref(w), None)
@@ -191,13 +238,37 @@ def main():
                 time.sleep(0.1)
 
         threading.Thread(target=sender, daemon=True).start()
+        shot = None                                     # [w, h, bytes, data] while a screenshot comes in
         while True:
             ok = winusb.WinUsb_ReadPipe(hu, 0x81, buf, len(buf), ctypes.byref(n), None)
             if not ok:
                 err = ctypes.get_last_error()
                 print('usblog: read error %d, reconnecting' % err, flush=True)
                 break
-            data = buf.raw[:n.value].replace(b'\x00', b'')
+            raw = buf.raw[:n.value]
+            if shot is not None:
+                end = raw.strip() == SHOT_END
+                if not end and len(shot[3]) < shot[2]:
+                    shot[3] += raw
+                    continue
+                if len(shot[3]) >= shot[2]:
+                    os.makedirs(SHOTS, exist_ok=True)
+                    name = '%s_%s_%s.png' % (shot_meta[0], time.strftime('%Y-%m-%d_%H-%M-%S'), shot_meta[1])
+                    save_png(os.path.join(SHOTS, name), shot[0], shot[1], bytes(shot[3][:shot[2]]))
+                    f.write(('\n[usblog] screenshot %s\n' % name).encode())
+                else:
+                    f.write(b'\n[usblog] screenshot incomplete\n')
+                shot = None
+                if end:
+                    continue
+            if raw.lstrip().startswith(SHOT_MARK) and raw.strip() != SHOT_END:
+                try:
+                    w_, h_, n_ = (int(x) for x in raw.strip()[len(SHOT_MARK):].rstrip(b'@').split())
+                    shot = [w_, h_, n_, bytearray()]
+                    continue
+                except ValueError:
+                    pass
+            data = raw.replace(b'\x00', b'')
             f.write(data)
             if quiet:
                 continue
