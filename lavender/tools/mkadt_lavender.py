@@ -42,6 +42,8 @@ SILVER_MPIDR = (0x0, 0x1, 0x2, 0x3)
 SILVER = '--silver' in sys.argv
 # --silver --gold4k: the same 4K kernel and RAM, booted by the shim (lv_gold=) on the A73s at full clock
 GOLD4K = '--gold4k' in sys.argv
+# --all8 (with --silver --gold4k): the A73s first (the shim boots XNU on 0x100), then the A53s
+ALL8 = '--all8' in sys.argv
 if SILVER:
     # 4K kernel: RAM from 0xc0000000 (lower bank above every carve-out, L1 index 3,
     # clear of the splash's L1 index 2) to the end of the upper bank: 3 GB, and the
@@ -106,7 +108,9 @@ def build(seed=None):
         node('asmb', [ph(), ('lp-sip0', u64(0x6f)), ('lp-sip1', u32(1))])])
 
     cpu_nodes = []
-    for core, mpidr in enumerate(SILVER_MPIDR if SILVER and not GOLD4K else GOLD_MPIDR):
+    cpu_list = GOLD_MPIDR + SILVER_MPIDR if ALL8 else (SILVER_MPIDR if SILVER and not GOLD4K else GOLD_MPIDR)
+    for core, mpidr in enumerate(cpu_list):
+        cl = 1 if mpidr < 0x100 and ALL8 else 0
         cpu_nodes.append(node(f'cpu{core}', [
             ph(),
             ('device_type', cstr('cpu')),
@@ -114,15 +118,15 @@ def build(seed=None):
             ('compatible', cstr('qcom,kryo260') + cstr('qcom,kryo470') + cstr('ARM,v8')),
             ('reg', u32(mpidr)),
             ('cpu-id', u32(core)),
-            ('cluster-id', u32(0)),
+            ('cluster-id', u32(cl)),
             ('cluster-type', u32(0)),
-            ('die-cluster-id', u32(0)),
-            ('cluster-core-id', u32(core)),
-            ('l2-cache-id', u32(0)),
+            ('die-cluster-id', u32(cl)),
+            ('cluster-core-id', u32(mpidr & 0xff)),
+            ('l2-cache-id', u32(cl)),
             ('l3-cache-id', u32(0)),
             ('state', cstr('running' if core == 0 else 'stopped')),
             ('timebase-frequency', u32(TIMEBASE)),
-            ('clock-frequency', u32(1843200000 if SILVER and not GOLD4K else 2208000000)),
+            ('clock-frequency', u32(1843200000 if (SILVER and not GOLD4K) or mpidr < 0x100 else 2208000000)),
             ('bus-frequency', u32(100000000)),
             ('memory-frequency', u32(1866000000)),
             ('peripheral-frequency', u32(TIMEBASE)),

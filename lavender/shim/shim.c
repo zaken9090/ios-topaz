@@ -2095,10 +2095,22 @@ void shim_main(const unsigned char *dtb, uintptr_t load)
 	puts_("\nwaking gold 0x100, silver parks\n");
 	gold_go = 1;
 	__asm__ volatile("dsb sy" ::: "memory");
+	/* (after lv_silver_l= the gold helper may still be switching itself off) */
+	for (int n = 0; n < 1000 && smc(PSCI_AFFINITY_INFO, GOLD_MPIDR, 0, 0) != 1; n++)
+		for (volatile int i = 0; i < 10000; i++)
+			;
 	int64_t r = (int64_t)smc(PSCI_CPU_ON, GOLD_MPIDR, (uintptr_t)secondary_entry, 4);
-	if (r == 0)
+	if (r == 0) {
+		/*
+		 * lv_gold: XNU will bring the A53s up itself (ADT --all8) with PSCI CPU_ON, which
+		 * fails on a core that is still running: switch this one off properly.
+		 */
+		const struct payload *pp = find_payload();
+		if (pp && bootarg_u32(pp->cmdline, "lv_gold=", 0) && bootarg_u32(pp->cmdline, "lv_silver_off=", 1))
+			(void)smc(PSCI_CPU_OFF, 0, 0, 0);
 		for (;;)	/* parked, DAIF masked; gold owns the screen now */
 			__asm__ volatile("wfe");
+	}
 	gold_go = 0;
 	fg = RED;
 	puts_("CPU_ON gold failed: ");
