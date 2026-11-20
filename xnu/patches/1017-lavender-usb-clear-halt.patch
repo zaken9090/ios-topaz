@@ -466,10 +466,19 @@ index f29a6ba..c002705 100644
  }
  #endif /* ARM64_BOARD_CONFIG_SWEET */
 diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
-index 2315900..3c9ca55 100644
+index 2315900..ab7b0e0 100644
 --- a/iokit/Kernel/arm/SweetFramebuffer.cpp
 +++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
-@@ -449,6 +449,7 @@ AppleCLCD::start(IOService *provider)
+@@ -258,6 +258,8 @@ public:
+  * the brightness slider is dead. It then sets "brightness-nits" here
+  * (SetBLDriverNitsValue) and IOMFBBrightnessLevel on the framebuffer.
+  */
++static AppleCLCD *gSweetShot;         /* lavender: the panel, for the USB screenshot */
++
+ class AppleARMBacklight : public IOService {
+ 	OSDeclareDefaultStructors(AppleARMBacklight);
+ public:
+@@ -449,6 +451,7 @@ AppleCLCD::start(IOService *provider)
  		fBootStride = fVig0[0x24 / 4];
  		fScanPhys = fBootSrc;
  		fScanStride = fBootStride;
@@ -477,7 +486,7 @@ index 2315900..3c9ca55 100644
  		IOLog("SWEET FB: MDP VIG0 src %#x stride %u (boot), direct scanout ready\n",
  		    fBootSrc, fBootStride);
  		sweet_scanout_set_geometry(fWidth, fHeight, fLogicalW, fLogicalH);
-@@ -1140,6 +1141,42 @@ AppleCLCD::scanFrom(uint64_t pa, uint32_t stride)
+@@ -1140,6 +1143,40 @@ AppleCLCD::scanFrom(uint64_t pa, uint32_t stride)
  	fScanStride = stride;
  }
  
@@ -486,8 +495,6 @@ index 2315900..3c9ca55 100644
 + * GPU pool surfaces through the GPU driver's write-combined view, our flip buffers and the
 + * boot framebuffer through their kernel mappings. 32-bit BGRA.
 + */
-+static AppleCLCD *gSweetShot;
-+
 +extern "C" bool sweet_fb_shot_source(const uint8_t **va, uint32_t *stride, uint32_t *w, uint32_t *h);
 +extern "C" bool
 +sweet_fb_shot_source(const uint8_t **va, uint32_t *stride, uint32_t *w, uint32_t *h)
