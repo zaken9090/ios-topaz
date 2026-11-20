@@ -1,5 +1,5 @@
 diff --git a/bsd/dev/sweet_usb.c b/bsd/dev/sweet_usb.c
-index f29a6ba..daf19a2 100644
+index f29a6ba..0966dad 100644
 --- a/bsd/dev/sweet_usb.c
 +++ b/bsd/dev/sweet_usb.c
 @@ -205,6 +205,11 @@ static struct {
@@ -221,7 +221,7 @@ index f29a6ba..daf19a2 100644
 +	    dwc_rd(GEVNTCOUNT) & 0xffff);
 +	printf("SWEET USB: BLACKBOX DSTS 0x%08x DCTL 0x%08x DCFG 0x%08x GSTS 0x%08x GCTL 0x%08x GUSB2PHYCFG 0x%08x "
 +	    "DALEPENA 0x%08x DEPCMD tx 0x%08x rx 0x%08x ep0 0x%08x\n", dwc_rd(DSTS), dwc_rd(DCTL), dwc_rd(DCFG),
-+	    dwc_rd(GSTS), dwc_rd(GCTL), dwc_rd(0xc200), dwc_rd(DALEPENA), dwc_rd(DEPCMD(EP_TX)),
++	    dwc_rd(0xc118), dwc_rd(GCTL), dwc_rd(0xc200), dwc_rd(DALEPENA), dwc_rd(DEPCMD(EP_TX)),
 +	    dwc_rd(DEPCMD(EP_RX)), dwc_rd(DEPCMD(0)));
 +	printf("SWEET USB: BLACKBOX TRB tx %08x %08x %08x %08x ep0out %08x %08x %08x %08x\n",
 +	    tt[0], tt[1], tt[2], tt[3], t0[0], t0[1], t0[2], t0[3]);
