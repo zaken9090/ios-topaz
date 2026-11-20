@@ -233,6 +233,8 @@ struct image {
 	uint64_t sum;                   /* ... and what it added up to */
 	unsigned quiet;                 /* ... how many sums in a row came out the same */
 	bool sub_ok;                    /* ... refilled with glTexSubImage2D (until that fails) */
+	uint64_t seg_sum[16];           /* lavender: ... the sums of its 16 slices (one slice a look: surface_changed()) */
+	unsigned seg_next;
 	GLenum to, internal, format, type;
 	uint32_t plane, seed;
 	GLsizei width, height;
@@ -689,16 +691,43 @@ surface_changed(struct eagl *e, struct image *image)
 		return false;
 	}
 	image->looked = e->frames + 1;
-	for (size_t at = 0; at + 8 <= size; at += 8) {
+	/*
+	 * lavender: adding up all of it was 15 % of the window server's time (profile, 2026-11-21:
+	 * 291 surfaces copied, 11 MB ones among them). Now a look adds up one word in every 512
+	 * bytes (any change bigger than that shows at once) and one 16th of the memory in full,
+	 * a different 16th each look, against that slice's last sum (a change of a few bytes
+	 * shows within 16 looks).
+	 */
+	for (size_t at = 0; at + 8 <= size; at += 512) {
 		memcpy(&word, base + at, 8);
 		sum = (sum ^ word) * 0x9e3779b97f4a7c15ull;
 		sum ^= sum >> 29;
 	}
-	if (sum == image->sum) {
+	bool changed = sum != image->sum;
+	image->sum = sum;
+	{
+		size_t slice = ((size / 16) + 7) & ~(size_t)7;
+		unsigned first = image->seg_next == 0 ? 0 : (image->seg_next & 15);
+		unsigned last = image->seg_next == 0 ? 15 : first;     /* the first look: every slice */
+		for (unsigned k = first; k <= last; k++) {
+			size_t from = slice * k, to = from + slice < size ? from + slice : size;
+			uint64_t s = from + 1;
+			for (size_t at = from; at + 8 <= to; at += 8) {
+				memcpy(&word, base + at, 8);
+				s = (s ^ word) * 0x9e3779b97f4a7c15ull;
+				s ^= s >> 29;
+			}
+			if (s != image->seg_sum[k]) {
+				changed = true;
+				image->seg_sum[k] = s;
+			}
+		}
+		image->seg_next = image->seg_next == 0 ? 17 : image->seg_next + 1;
+	}
+	if (!changed) {
 		image->quiet++;
 		return false;
 	}
-	image->sum = sum;
 	image->quiet = 0;
 	return true;
 }
