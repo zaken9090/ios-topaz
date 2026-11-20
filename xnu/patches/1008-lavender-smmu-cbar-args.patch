@@ -1,0 +1,41 @@
+diff --git a/iokit/Kernel/arm/TopazAdreno.cpp b/iokit/Kernel/arm/TopazAdreno.cpp
+index e5ca9d3..e5f524d 100644
+--- a/iokit/Kernel/arm/TopazAdreno.cpp
++++ b/iokit/Kernel/arm/TopazAdreno.cpp
+@@ -889,10 +889,18 @@ smmu_setup(void)
+ 	wr(smmu, SMMU_CB0 + 0x000, 0);                  /* SCTLR off while programming */
+ 	wr(smmu, SMMU_CB0 + 0x058, 0xFFFFFFFF);         /* FSR clear */
+ 	wr(smmu, 0x1000 + 0x800, 1);                    /* CBA2R0: AArch64 descriptors */
+-	wr(smmu, 0x1000, 0x0001f000);                   /* CBAR0: S1 translate, S2 bypass */
++	/*
++	 * lavender: CBAR0 (default 0x1f000: S1 translate, S2 bypass, MemAttr WB; Linux arm-smmu adds BPSHCFG NSH 3<<8,
++	 * arm-smmu writes it) and TCR are boot-args (gpu_cbar=, gpu_tcr=) while translation is
++	 * being made to work on this hypervisor-managed SMMU.
++	 */
++	uint32_t cbar = 0x0001f000, tcr = 32 | (1u << 23);
++	PE_parse_boot_argn("gpu_cbar", &cbar, sizeof(cbar));
++	PE_parse_boot_argn("gpu_tcr", &tcr, sizeof(tcr));
++	wr(smmu, 0x1000, cbar);
+ 	wr(smmu, SMMU_CB0 + 0x020, (uint32_t)l1.pa);
+ 	wr(smmu, SMMU_CB0 + 0x024, (uint32_t)(l1.pa >> 32));
+-	wr(smmu, SMMU_CB0 + 0x030, 32 | (1u << 23));    /* TCR: T0SZ 32, 4 KB, NC walks, EPD1 */
++	wr(smmu, SMMU_CB0 + 0x030, tcr);                /* TCR: T0SZ 32, 4 KB, NC walks, EPD1 */
+ 	wr(smmu, SMMU_CB0 + 0x010, 1);                  /* TCR2: PASize 36 bits */
+ 	wr(smmu, SMMU_CB0 + 0x038, 0x44);               /* MAIR0: attr0 = Normal non-cacheable */
+ 	wr(smmu, SMMU_CB0 + 0x03C, 0);
+@@ -1574,12 +1582,13 @@ topaz_adreno_thread(__unused void *param, __unused wait_result_t wr_)
+ 				}
+ 			}
+ 			panic("TopazGPU diag (lavender a512): start %s | GX %08x CX %08x | RBBM_STATUS %08x SECVID_TRUST %08x "
+-			    "CP_HW_FAULT %08x INT %08x | rptr %u wptr %u | SMMU cb0 SCTLR %08x FSR %08x | core %u MHz | rpm %d cx %#x ddr %u | FAR %llx FSYNR %x | PAR sqe %llx pfp %llx pfp+3000 %llx ring %llx mem %llx | pte pfp %llx pfp+3000 %llx ring %llx",
++			    "CP_HW_FAULT %08x INT %08x | rptr %u wptr %u | SMMU cb0 SCTLR %08x FSR %08x | core %u MHz | rpm %d cx %#x ddr %u | IDR1 %08x CBAR %08x TCR %08x CBA2R %08x | FAR %llx FSYNR %x | PAR sqe %llx pfp %llx pfp+3000 %llx ring %llx mem %llx | pte pfp %llx pfp+3000 %llx ring %llx",
+ 			    ok ? "OK" : "FAILED", gpucc ? rd(gpucc, 0x1094) : 0, gpucc ? rd(gpucc, 0x1004) : 0,
+ 			    gpu ? gpu_rd(0x4f5) : 0, gpu ? gpu_rd(0xf400) : 0, gpu ? gpu_rd(0xb1a) : 0, gpu ? gpu_rd(0x4e1) : 0,
+ 			    gpu ? gpu_rd(0x806) : 0, wptr % RB_DWORDS, smmu ? rd(smmu, SMMU_CB0) : 0,
+ 			    smmu ? rd(smmu, SMMU_CB0 + 0x58) : 0, core_mhz, topaz_rpm_status, cx_level, ddr_khz,
+-			    diag_far, diag_fsynr, diag_par[0], diag_par[1], diag_par[2], diag_par[3], diag_par[4], diag_pte[1], diag_pte[2], diag_pte[3]);
++			    smmu ? rd(smmu, 0x24) : 0, smmu ? rd(smmu, 0x1000) : 0, smmu ? rd(smmu, SMMU_CB0 + 0x30) : 0,
++			    smmu ? rd(smmu, 0x1800) : 0, diag_far, diag_fsynr, diag_par[0], diag_par[1], diag_par[2], diag_par[3], diag_par[4], diag_pte[1], diag_pte[2], diag_pte[3]);
+ 		}
+ 	}
+ 	if (!ok) {
