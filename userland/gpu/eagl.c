@@ -577,6 +577,38 @@ static void fetch_bind(struct eagl *e);
 
 static void mirror_refresh(struct eagl *e, struct image *image);
 
+/*
+ * lavender: boot-arg gldump=FRAME,FIRST,LAST - after draws FIRST..LAST (1-based) of that frame,
+ * the bottom-left 48 x 96 pixels of the framebuffer drawn into, as "gldump" lines of hex (RGBA),
+ * a row a line (tools: dump-png.py makes pictures of them).
+ */
+static unsigned dump_frame, dump_first, dump_last;
+
+static void
+dump_draw(struct eagl *e)
+{
+	GLint viewport[4];
+	unsigned char pixels[48 * 4];
+	char line[48 * 8 + 1];
+	GLsizei w, h;
+
+	if (dump_frame == 0 || e->frames + 1 != dump_frame || e->draws < dump_first || e->draws > dump_last) {
+		return;
+	}
+	glGetIntegerv(GL_VIEWPORT, viewport);
+	w = viewport[2] < 48 ? viewport[2] : 48;
+	h = viewport[3] < 96 ? viewport[3] : 96;
+	say("gldump %u %u fb %u colour %u program %u viewport %d x %d: %d x %d\n", dump_frame, e->draws, e->framebuffer, e->colour,
+	    e->program, viewport[2], viewport[3], w, h);
+	for (GLsizei y = 0; y < h; y++) {
+		glReadPixels(0, y, w, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
+		for (GLsizei i = 0; i < w * 4; i++) {
+			snprintf(line + 2 * i, 3, "%02x", pixels[i]);
+		}
+		say("gldump %u %u row %d %s\n", dump_frame, e->draws, y, line);
+	}
+}
+
 static void
 order_before_draw(struct eagl *e)
 {
@@ -3056,6 +3088,7 @@ my_glDrawArrays(void *context, GLenum mode, GLint first, GLsizei count)
 	if (trace_listed) {
 		trace_placed_look(e);
 	}
+	dump_draw(e);
 	EAGL_LEAVE(e, 0x210);
 	if (eagl_tracing) {
 		trace_pixels(e);
@@ -3229,6 +3262,7 @@ my_glDrawElements(void *context, GLenum mode, GLsizei count, GLenum type, const 
 	if (trace_listed) {
 		trace_placed_look(e);
 	}
+	dump_draw(e);
 	EAGL_LEAVE(e, 0x220);
 	if (eagl_tracing) {
 		trace_pixels(e);
@@ -4179,6 +4213,11 @@ install(void)
 		sync_on = strstr(arguments, "glsync=0") == NULL;
 		mip_flush = strstr(arguments, "glmipflush=0") == NULL;
 		no_mip = strstr(arguments, "glnomip=1") != NULL;
+		if ((argument = strstr(arguments, "gldump=")) != NULL) {
+			dump_frame = (unsigned)strtoul(argument + 7, (char **)&argument, 10);
+			dump_first = *argument == ',' ? (unsigned)strtoul(argument + 1, (char **)&argument, 10) : 1;
+			dump_last = *argument == ',' ? (unsigned)strtoul(argument + 1, NULL, 10) : dump_first;
+		}
 		group_vibrant_on = strstr(arguments, "glgroup=0") == NULL;
 		if ((argument = strstr(arguments, "gltrace_place=")) != NULL) {
 			char *end = (char *)argument + 14;
