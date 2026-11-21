@@ -23,7 +23,22 @@ def lum(y0, y1):
     return s / n
 
 
-dock = lum(int(h * 0.915), int(h * 0.94))      # between the dock icons' tops and the bottom edge
-above = lum(int(h * 0.80), int(h * 0.83))      # wallpaper above the dock
-print('dock %.0f above %.0f' % (dock, above))
-sys.exit(0 if dock > above + 25 else 1)
+def blue(y0, y1):
+    """mean blue minus red: the wallpaper is blue, the dock (light or, with Reduce Transparency, dark) grey"""
+    s = n = 0
+    for y in range(y0, y1, 4):
+        row = raw[y * stride + 1:(y + 1) * stride]
+        for x in range(0, w * 3, 30):
+            s += row[x + 2] - row[x]
+            n += 1
+    return s / n
+
+
+dock = blue(int(h * 0.915), int(h * 0.94)), blue(int(h * 0.975), int(h * 0.99))   # dock above and below its icons
+above = blue(int(h * 0.80), int(h * 0.83))      # wallpaper above the dock
+print('blue-red: dock %.0f %.0f, above %.0f' % (dock[0], dock[1], above))
+ldock = lum(int(h * 0.915), int(h * 0.94))
+labove = lum(int(h * 0.80), int(h * 0.83))
+print('light: dock %.0f above %.0f' % (ldock, labove))
+# a light dock over the wallpaper, or a grey (dark) one over a blue wallpaper
+sys.exit(0 if ldock > labove + 25 or (above > 40 and max(dock) < above / 2) else 1)

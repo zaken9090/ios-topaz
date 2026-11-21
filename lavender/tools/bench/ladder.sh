@@ -15,6 +15,6 @@ for img in "$@"; do
 	ok=0; for i in $(seq 1 75); do tail -c +$s $L | grep -aq LVSTAT && { ok=1; break; }; sleep 2; done
 	[ $ok = 1 ] || { echo "$n HUNG (no LVSTAT)"; echo "$(date +%T) [$n] HUNG: no LVSTAT in 150 s" >> $P/dump/bench-live.txt; echo "$(date +%T) [$n] =========END TEST${TESTNO:+ $TESTNO}=========" >> $P/dump/bench-live.txt; beep; exit 1; }
 	sleep 40
-	LOG=$L bash $S/bench.sh $n 0 now 2>&1 | grep -E "RESULT|spotlight"
+	LOG=$L bash $S/bench.sh $n ${PROF:-0} now 2>&1 | grep -E "RESULT|spotlight"
 done
 python ios-lavender/lavender/tools/usblog.py --cmd fastboot >/dev/null
