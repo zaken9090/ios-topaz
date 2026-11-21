@@ -371,6 +371,8 @@ static int sync_frames = 1;             /* boot-arg glsync=0 (a test): a frame's
  */
 static int fetch_offered = 1;
 static int fetch_emulated;                      /* lavender: the library lacks EXT_shader_framebuffer_fetch: emulated (fragment_fetch_emulated) */
+static int sync_on = 1;                         /* lavender: glsync (mirror_refresh()) */
+static unsigned sync_count;
 
 #define GL_SCISSOR_TEST                 0x0c11
 #define GL_SCISSOR_BOX                  0x0c10
@@ -954,8 +956,6 @@ surface_to_texture(struct eagl *e, struct image *image)
  */
 #define SURFACE_GENS 4096
 static uint32_t surface_gen[SURFACE_GENS];
-static int sync_on = 1;
-static unsigned sync_count;
 
 static void
 mirror_refresh(struct eagl *e, struct image *image)
