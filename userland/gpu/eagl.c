@@ -226,6 +226,7 @@ struct image {
 	bool invert, drawn;
 	bool shared;                    /* the texture is the surface's memory: nothing to copy */
 	GLuint mirror;                  /* a texture that is the surface's memory, which the GPU copies the frame into (blit_targets) */
+	uint32_t gen;                   /* lavender: the surface's generation this texture holds (surface_gen, mirror_refresh()) */
 	bool wrapped;                   /* the surface is memory of somebody's with a surface made around it */
 	bool alpha_first;               /* its pixels are opacity, blue, green, red in memory: see my_attachImage() */
 	bool painted;                   /* something has been drawn into it (it is a target in fact, not only in name) */
@@ -572,11 +573,33 @@ order_forget(void)
 
 static void fetch_bind(struct eagl *e);
 
+static void mirror_refresh(struct eagl *e, struct image *image);
+
 static void
 order_before_draw(struct eagl *e)
 {
 	struct image *image;
 
+	if (sync_on) {
+		GLboolean boxed = glIsEnabled(GL_SCISSOR_TEST);
+		bool touched = false;
+
+		for (unsigned unit = 0; unit < 4; unit++) {
+			if (e->bound[unit] != 0 && (image = image_of(e, e->bound[unit])) != NULL && image->target && image->mirror != 0) {
+				uint32_t before = sync_count;
+				mirror_refresh(e, image);
+				touched |= sync_count != before;
+			}
+		}
+		if (e->colour != 0 && (image = image_of(e, e->colour)) != NULL && image->target && image->mirror != 0) {
+			uint32_t before = sync_count;
+			mirror_refresh(e, image);
+			touched |= sync_count != before;
+		}
+		if (touched && boxed) {
+			glEnable(GL_SCISSOR_TEST);
+		}
+	}
 	fetch_bind(e);
 
 	if (!order_on) {
@@ -919,6 +942,55 @@ surface_to_texture(struct eagl *e, struct image *image)
 	e->upload_bytes += row * (size_t)image->height;
 }
 
+/*
+ * lavender: one IOSurface is often attached to several textures (CoreAnimation attaches a display
+ * surface again and again, each time a texture of its own); with blit_targets each is the
+ * library's own memory, and each frame drawn into one is copied into the surface at the frame's
+ * end. CoreAnimation draws only what has changed: a texture that was not the last one drawn
+ * into held an old picture, and what was drawn into it next, or a blur that read it (the
+ * backdrop behind Spotlight, the shade, Control Center), had blocks of old pictures in it. Each
+ * surface counts the frames copied into it; a texture that is behind is brought up to date from
+ * the surface's memory, by the GPU, before it is drawn into or read (glsync=0: not).
+ */
+#define SURFACE_GENS 4096
+static uint32_t surface_gen[SURFACE_GENS];
+static int sync_on = 1;
+static unsigned sync_count;
+
+static void
+mirror_refresh(struct eagl *e, struct image *image)
+{
+	uint32_t id;
+	GLint read = 0, draw = 0;
+
+	if (!sync_on || image == NULL || !image->target || image->mirror == 0 || image->surface == NULL) {
+		return;
+	}
+	id = IOSurfaceGetID(image->surface) % SURFACE_GENS;
+	if (image->gen == surface_gen[id]) {
+		return;
+	}
+	glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &read);
+	glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &draw);
+	if (e->reader == 0) {
+		glGenFramebuffers(1, &e->reader);
+	}
+	if (e->writer == 0) {
+		glGenFramebuffers(1, &e->writer);
+	}
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, e->reader);
+	glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, image->mirror, 0);
+	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, e->writer);
+	glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, image->texture, 0);
+	glDisable(GL_SCISSOR_TEST);
+	glBlitFramebuffer(0, image->invert ? image->height : 0, image->width, image->invert ? 0 : image->height, 0, 0,
+	    image->width, image->height, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, (GLuint)read);
+	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, (GLuint)draw);
+	image->gen = surface_gen[id];
+	sync_count++;
+}
+
 /* What has been drawn into a texture, into its IOSurface, unless it is there (frame_end() waits for it). */
 static void
 target_to_surface(struct eagl *e, struct image *image)
@@ -948,6 +1020,10 @@ target_to_surface(struct eagl *e, struct image *image)
 		    image->invert ? 0 : image->height, GL_COLOR_BUFFER_BIT, GL_NEAREST);
 		glBindFramebuffer(GL_READ_FRAMEBUFFER, (GLuint)read);
 		glBindFramebuffer(GL_DRAW_FRAMEBUFFER, (GLuint)draw);
+		{
+			uint32_t id = IOSurfaceGetID(surface) % SURFACE_GENS;
+			image->gen = ++surface_gen[id];         /* (the surface is now this texture: the others of it are behind) */
+		}
 		if (IOSurfaceLock(surface, 0, NULL) == 0) {
 			IOSurfaceUnlock(surface, 0, NULL);
 		}
@@ -4059,6 +4135,7 @@ install(void)
 		solid_on = strstr(arguments, "glsolid=0") == NULL;
 		zero_on = strstr(arguments, "glzero=0") == NULL;
 		order_on = strstr(arguments, "glorder=0") == NULL;
+		sync_on = strstr(arguments, "glsync=0") == NULL;
 		group_vibrant_on = strstr(arguments, "glgroup=0") == NULL;
 		if ((argument = strstr(arguments, "gltrace_place=")) != NULL) {
 			char *end = (char *)argument + 14;
