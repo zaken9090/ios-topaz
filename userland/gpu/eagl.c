@@ -369,6 +369,7 @@ static int sync_frames = 1;             /* boot-arg glsync=0 (a test): a frame's
  * CoreAnimation, to see the difference.
  */
 static int fetch_offered = 1;
+static int fetch_emulated;                      /* lavender: the library lacks EXT_shader_framebuffer_fetch: emulated (fragment_fetch_emulated) */
 
 #define GL_SCISSOR_TEST                 0x0c11
 #define GL_SCISSOR_BOX                  0x0c10
@@ -3583,7 +3584,6 @@ static const char fragment_plain_end[] =
  * reads the framebuffer's own texture at the fragment (bound to unit 15 after a flush before
  * each such draw, fetch_bind()); CoreAnimation's quads do not overlap themselves.
  */
-static int fetch_emulated;
 static const char fragment_fetch_emulated[] =
     "layout(location = 0) out highp vec4 redwood_colour;\n"
     "uniform highp sampler2D redwood_fb;\n"
