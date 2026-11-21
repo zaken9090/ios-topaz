@@ -81,3 +81,7 @@ say "settings: $S"
 result "home: $H | settings: $S"
 [ "$2" = 1 ] && { sleep 3; tail -c +$s1 "$F" | grep -a 'PROF' | head -100; }
 cmd "key home"; sleep 1
+# Spotlight over the home screen: the blurred backdrop where the GPU path showed blocks of old pictures
+sleep 2; cmd "swipe 540 900 540 1600 400"; sleep 3
+SH=$(shot spotlight); say "spotlight ($(basename "$SH")) - look at the backdrop"
+cmd "key home"; sleep 1
