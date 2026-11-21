@@ -569,10 +569,14 @@ order_forget(void)
 	drawn_count = 0;
 }
 
+static void fetch_bind(struct eagl *e);
+
 static void
 order_before_draw(struct eagl *e)
 {
 	struct image *image;
+
+	fetch_bind(e);
 
 	if (!order_on) {
 		return;
@@ -3231,7 +3235,12 @@ my_glGetString(void *context, GLenum name)
 	EAGL_ENTER(e, 0x3b0);
 	/* 0x8a1e is no name of OpenGL ES's; iOS's library answers it (the constructor of CA::OGL::GLESContext asks) */
 	string = name == 0x8a1e ? (const GLubyte *)"" : glGetString(name);
-	if (name == GL_EXTENSIONS && string != NULL && !fetch_offered) {
+	if (name == GL_EXTENSIONS && string != NULL && fetch_offered && strstr((const char *)string, "GL_EXT_shader_framebuffer_fetch") == NULL) {
+		static char with[8192];
+		snprintf(with, sizeof(with), "%s GL_EXT_shader_framebuffer_fetch", (const char *)string);
+		fetch_emulated = 1;
+		string = (const GLubyte *)with;
+	} else if (name == GL_EXTENSIONS && string != NULL && !fetch_offered) {
 		static char without[8192];      /* (the list less that extension: see fetch_offered) */
 		size_t used = 0;
 
@@ -3566,6 +3575,26 @@ static const char fragment_plain[] =
 static const char fragment_plain_end[] =
     "\n#undef main\n"
     "void main() { redwood_main(); redwood_colour = redwood_data[0]; }\n";
+/*
+ * lavender (after ios-sailfish): Mesa's freedreno has no EXT_shader_framebuffer_fetch on the
+ * Adreno 5xx, and without it CoreAnimation drops every layer with a blending filter (Control
+ * Center's circles, App Library plates, Reduce Transparency's backgrounds: blur showed the
+ * picture behind sharp). The extension is offered all the same and emulated: gl_LastFragData
+ * reads the framebuffer's own texture at the fragment (bound to unit 15 after a flush before
+ * each such draw, fetch_bind()); CoreAnimation's quads do not overlap themselves.
+ */
+static int fetch_emulated;
+static const char fragment_fetch_emulated[] =
+    "layout(location = 0) out highp vec4 redwood_colour;\n"
+    "uniform highp sampler2D redwood_fb;\n"
+    "uniform highp vec2 redwood_fb_scale;\n"
+    "highp vec4 redwood_last[1];\n"
+    "#define gl_LastFragData redwood_last\n"
+    "#define main redwood_main\n"
+    "#line 1\n";
+static const char fragment_fetch_emulated_end[] =
+    "\n#undef main\n"
+    "void main() { redwood_last[0] = texture(redwood_fb, gl_FragCoord.xy * redwood_fb_scale); redwood_main(); redwood_colour = redwood_data[0]; }\n";
 static const char fragment_fetch[] =
     "layout(location = 0) inout highp vec4 redwood_colour;\n"
     "highp vec4 redwood_last[1];\n"
@@ -3581,6 +3610,32 @@ static const char vertex_start[] =
     "#define texture2D texture\n"
     "#define texture2DLod textureLod\n"
     "#line 1\n";
+
+static bool shader_fetch[4096];                 /* shaders that read gl_LastFragData (emulated) */
+static struct { GLint fb, scale; } program_fetch[4096];  /* their programs' uniforms, +1 (0: not one) */
+static unsigned fetch_draws;
+
+/* before a draw: the framebuffer's texture where the program reads it (fetch_emulated) */
+static void
+fetch_bind(struct eagl *e)
+{
+	GLint w = 0, h = 0;
+
+	if (e->program == 0 || e->program >= 4096 || program_fetch[e->program].fb == 0 || e->colour == 0) {
+		return;
+	}
+	glFlush();                              /* (the draws so far written out before they are read) */
+	glActiveTexture(GL_TEXTURE0 + 15);
+	glBindTexture(GL_TEXTURE_2D, e->colour);
+	glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &w);
+	glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &h);
+	glActiveTexture(GL_TEXTURE0 + e->unit);
+	glUniform1i(program_fetch[e->program].fb - 1, 15);
+	if (program_fetch[e->program].scale > 0) {
+		glUniform2f(program_fetch[e->program].scale - 1, w > 0 ? 1.0f / (GLfloat)w : 1.0f, h > 0 ? 1.0f / (GLfloat)h : 1.0f);
+	}
+	fetch_draws++;
+}
 
 static GLuint
 my_glCreateShader(void *context, GLenum type)
@@ -3626,8 +3681,10 @@ my_glShaderSource(void *context, GLuint shader, GLsizei count, const GLchar *con
 	for (line = text; (line = strstr(line, "#extension")) != NULL; line += 2) {
 		size_t length = strcspn(line, "\n");
 
-		strncat(head, line, length);
-		strcat(head, "\n");
+		if (!(fetch_emulated && strncmp(line, "#extension GL_EXT_shader_framebuffer_fetch", 42) == 0)) {
+			strncat(head, line, length);
+			strcat(head, "\n");
+		}
 		line[0] = line[1] = '/';
 		extensions++;
 	}
@@ -3635,8 +3692,11 @@ my_glShaderSource(void *context, GLuint shader, GLsizei count, const GLchar *con
 	parts[3] = text;
 	if (fragment) {
 		fetch = strstr(text, "gl_LastFragData") != NULL;
-		parts[2] = fetch ? fragment_fetch : fragment_plain;
-		parts[4] = fetch ? fragment_fetch_end : fragment_plain_end;
+		parts[2] = fetch ? (fetch_emulated ? fragment_fetch_emulated : fragment_fetch) : fragment_plain;
+		parts[4] = fetch ? (fetch_emulated ? fragment_fetch_emulated_end : fragment_fetch_end) : fragment_plain_end;
+		if (shader < sizeof(shader_fetch)) {
+			shader_fetch[shader] = fetch && fetch_emulated;
+		}
 	}
 	free((void *)e->sources[shader % 64]);
 	e->sources[shader % 64] = text;
@@ -3689,6 +3749,21 @@ my_glLinkProgram(void *context, GLuint program)
 	glLinkProgram(program);
 	glGetProgramiv(program, GL_LINK_STATUS, &good);
 	e->programs++;
+	if (program < 4096) {
+		GLuint attached[4];
+		GLsizei n = 0;
+		bool fetch = false;
+
+		program_fetch[program].fb = program_fetch[program].scale = 0;
+		glGetAttachedShaders(program, 4, &n, attached);
+		for (GLsizei i = 0; i < n; i++) {
+			fetch |= attached[i] < sizeof(shader_fetch) && shader_fetch[attached[i]];
+		}
+		if (fetch && good) {
+			program_fetch[program].fb = glGetUniformLocation(program, "redwood_fb") + 1;
+			program_fetch[program].scale = glGetUniformLocation(program, "redwood_fb_scale") + 1;
+		}
+	}
 	if (!good) {
 		glGetProgramInfoLog(program, sizeof(said), NULL, said);
 		say("redwood-gl: A PROGRAM DOES NOT LINK (program %u): %s\n", program, said);
