@@ -586,6 +586,7 @@ static void mirror_refresh(struct eagl *e, struct image *image);
 #define GL_VIEWPORT                     0x0ba2
 #endif
 static unsigned dump_frame, dump_first, dump_last;
+static GLint dump_vp_w, dump_vp_h, dump_vp_n;
 
 static void
 dump_draw(struct eagl *e)
@@ -595,10 +596,16 @@ dump_draw(struct eagl *e)
 	char line[48 * 8 + 1];
 	GLsizei w, h;
 
+	glGetIntegerv(GL_VIEWPORT, viewport);
+	/* gldumpvp=WxH,N: from the first draw into a viewport of that size on, N draws of that frame */
+	if (dump_vp_w != 0 && dump_frame == 0 && viewport[2] == dump_vp_w && viewport[3] == dump_vp_h) {
+		dump_frame = e->frames + 1;
+		dump_first = e->draws;
+		dump_last = e->draws + dump_vp_n;
+	}
 	if (dump_frame == 0 || e->frames + 1 != dump_frame || e->draws < dump_first || e->draws > dump_last) {
 		return;
 	}
-	glGetIntegerv(GL_VIEWPORT, viewport);
 	w = viewport[2] < 48 ? viewport[2] : 48;
 	h = viewport[3] < 96 ? viewport[3] : 96;
 	say("gldump %u %u fb %u colour %u program %u viewport %d x %d: %d x %d\n", dump_frame, e->draws, e->framebuffer, e->colour,
@@ -4216,6 +4223,11 @@ install(void)
 		sync_on = strstr(arguments, "glsync=0") == NULL;
 		mip_flush = strstr(arguments, "glmipflush=0") == NULL;
 		no_mip = strstr(arguments, "glnomip=1") != NULL;
+		if ((argument = strstr(arguments, "gldumpvp=")) != NULL) {
+			dump_vp_w = (GLint)strtoul(argument + 9, (char **)&argument, 10);
+			dump_vp_h = *argument == 'x' ? (GLint)strtoul(argument + 1, (char **)&argument, 10) : 0;
+			dump_vp_n = *argument == ',' ? (GLint)strtoul(argument + 1, NULL, 10) : 6;
+		}
 		if ((argument = strstr(arguments, "gldump=")) != NULL) {
 			dump_frame = (unsigned)strtoul(argument + 7, (char **)&argument, 10);
 			dump_first = *argument == ',' ? (unsigned)strtoul(argument + 1, (char **)&argument, 10) : 1;
