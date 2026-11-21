@@ -119,7 +119,8 @@ def build(seed=None):
             ('reg', u32(mpidr)),
             ('cpu-id', u32(core)),
             ('cluster-id', u32(cl)),
-            ('cluster-type', u32(0)),
+            # lavender (xnu 1026, __ARM_AMP__): with --all8 the A73s are the P cluster, the A53s E
+            ('cluster-type', u32((ord('E') if mpidr < 0x100 else ord('P')) if ALL8 else 0)),
             ('die-cluster-id', u32(cl)),
             ('cluster-core-id', u32(mpidr & 0xff)),
             ('l2-cache-id', u32(cl)),
