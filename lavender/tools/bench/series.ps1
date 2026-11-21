@@ -8,7 +8,6 @@ foreach ($img in $Images) {
 		Write-Host "[$n/$($Images.Count)] try $try waiting for fastboot for $img"
 		while (-not ((& $fb devices) -match 'fastboot')) { Start-Sleep -Seconds 2 }
 		Start-Sleep -Seconds 3
-		[console]::Beep(880,300); [console]::Beep(1175,300)
 		& $fb boot $img
 		if ($LASTEXITCODE -eq 0) { break }
 		Write-Host "[$n] boot failed: replug needed"

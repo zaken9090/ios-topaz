@@ -2,7 +2,7 @@
 # watch.sh: phone state. Exits (so Claude is notified) when the phone shows up in fastboot.
 # Beeps when the phone looks hung: log silent > 60 s and no fastboot (at most every 3 min).
 P=/c/Users/Vasyl/Desktop/Claude/Projects/Android-iOS
-F="$P/dump/usblog-m40.txt"
+F="$P/dump/usblog-m45.txt"
 FB="$P/platform-tools/fastboot.exe"
 last=$(wc -c < "$F"); quiet=0; beeped=0
 while true; do

@@ -7,7 +7,7 @@ if ($LASTEXITCODE -ne 0) { Write-Host "CI FAILED $Run"; exit 1 }
 & $gh run download $Run -R zaken9090/ios-topaz -n xnu-kernel -D "$P\ci\run-$Run"
 $k = "$P\ci\run-$Run\kernel.development.sweet"
 New-Item -ItemType Directory -Force "$P\test\$Dir" | Out-Null
-$mk = 'C:\Users\Vasyl\AppData\Local\Temp\claude\880cf9603a2f840c\b1095f33-e9d6-4b97-bcfc-5f4a08d2a19a\scratchpad\mkimg.ps1'
+$mk = "$PSScriptRoot\mkimg.ps1"
 foreach ($s in $Specs) {
 	$name, $extra = $s -split '\|', 2
 	& $mk -Kernel $k -Adt $Adt -Out "$P\test\$Dir\$name.img" -Extra $extra | Out-Null
