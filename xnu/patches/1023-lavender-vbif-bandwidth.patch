@@ -1,0 +1,62 @@
+From abe8de5bcf637ca9fe972976cf5698a50787dcc6 Mon Sep 17 00:00:00 2001
+From: x <x@x>
+Date: Sat, 21 Nov 2026 05:16:16 +0200
+Subject: [PATCH] lavender: LVGPU line also shows the GPU's DRAM traffic (VBIF
+ AXI read/write data beats)
+
+---
+ iokit/Kernel/arm/TopazAdreno.cpp | 15 +++++++++++++--
+ 1 file changed, 13 insertions(+), 2 deletions(-)
+
+diff --git a/iokit/Kernel/arm/TopazAdreno.cpp b/iokit/Kernel/arm/TopazAdreno.cpp
+index 477153a..53f28ac 100644
+--- a/iokit/Kernel/arm/TopazAdreno.cpp
++++ b/iokit/Kernel/arm/TopazAdreno.cpp
+@@ -1099,6 +1099,10 @@ hw_init_regs(void)
+ 	gpu_wr(0x464, 1);                               /* RBBM_PERFCTR_CNTL */
+ 	gpu_wr(0xbb0, 0);                               /* lavender: CP_PERFCTR_CP_SEL_0 = CP_ALWAYS_COUNT (core clocks) */
+ 	gpu_wr(0x46b, 6);                               /* RBBM_PERFCTR_RBBM_SEL_0 = 6: GPU busy (as a5xx devfreq) */
++	gpu_wr(0x30d0, 63);                             /* lavender: VBIF_PERF_CNT_SEL0 = AXI_READ_DATA_BEATS_TOTAL */
++	gpu_wr(0x30d1, 84);                             /* VBIF_PERF_CNT_SEL1 = AXI_WRITE_DATA_BEATS_TOTAL */
++	gpu_wr(0x30c0, 1);                              /* VBIF_PERF_CNT_EN0 */
++	gpu_wr(0x30c1, 1);                              /* VBIF_PERF_CNT_EN1 */
+ 	gpu_wr(0xe96, 2);                               /* UCHE_CACHE_WAYS */
+ 	gpu_wr64(0xe89, 0x0001fffffffff000ull);         /* UCHE_TRAP_BASE */
+ 	gpu_wr64(0xe87, 0x0001fffffffff000ull);         /* UCHE_WRITE_THRU_BASE */
+@@ -1580,24 +1584,31 @@ topaz_osd_sampler(__unused void *param, __unused wait_result_t wr_)
+ 			 * lavender: the core's real clock (CP_ALWAYS_COUNT against the 19.2 MHz always-on counter)
+ 			 * and how busy the core itself was (RBBM countable 6), every 5 s while it draws.
+ 			 */
+-			static uint64_t last_cp, last_ao, last_busy;
++			static uint64_t last_cp, last_ao, last_busy, last_rd, last_wr;
+ 			static uint32_t secs;
+ 			if (ready && gpu != NULL) {
+ 				uint64_t cp = (uint64_t)gpu_rd(0x3a1) << 32 | gpu_rd(0x3a0);
+ 				uint64_t ao = (uint64_t)gpu_rd(0x4d3) << 32 | gpu_rd(0x4d2);
+ 				uint64_t bz = (uint64_t)gpu_rd(0x3b1) << 32 | gpu_rd(0x3b0);
++				uint64_t vr = (uint64_t)gpu_rd(0x30e0) << 32 | gpu_rd(0x30d8);  /* VBIF_PERF_CNT_HIGH0/LOW0 */
++				uint64_t vw = (uint64_t)gpu_rd(0x30e1) << 32 | gpu_rd(0x30d9);
+ 				if (++secs % 5 == 0 && last_ao != 0 && ao > last_ao && cp >= last_cp) {
+ 					uint64_t dcp = cp - last_cp, dao = ao - last_ao, dbz = bz - last_busy;
+ 					uint32_t mhz = (uint32_t)(dcp * 192 / dao / 10);
+ 					uint32_t core = dcp ? (uint32_t)(dbz * 100 / dcp) : 0;
++					/* AXI beats of 16 bytes, MB/s over the 5 s, and per second the core was busy */
++					uint64_t rdmb = (vr - last_rd) * 16 / 5 / 1000000, wrmb = (vw - last_wr) * 16 / 5 / 1000000;
+ 					if (topaz_osd_gpu_busy != 0 || core != 0) {
+-						IOLog("LVGPU clock %u MHz core busy %u%% (pending %u%%)\n", mhz, core, topaz_osd_gpu_busy);
++						IOLog("LVGPU clock %u MHz core busy %u%% (pending %u%%) DDR read %llu MB/s write %llu MB/s (%llu MB/s busy)\n",
++						    mhz, core, topaz_osd_gpu_busy, rdmb, wrmb, core ? (rdmb + wrmb) * 100 / core : 0);
+ 					}
+ 				}
+ 				if (secs % 5 == 0 || last_ao == 0) {
+ 					last_cp = cp;
+ 					last_ao = ao;
+ 					last_busy = bz;
++					last_rd = vr;
++					last_wr = vw;
+ 				}
+ 			}
+ 		}
+-- 
+2.56.0.windows.4
+
