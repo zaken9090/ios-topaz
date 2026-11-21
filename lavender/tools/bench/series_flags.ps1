@@ -5,7 +5,7 @@ $P = 'C:\Users\Vasyl\Desktop\Claude\Projects\Android-iOS'
 $S = $PSScriptRoot
 $live = "$P\dump\bench-live.txt"
 function Say($m) { $l = "$(Get-Date -Format HH:mm:ss) [series] $m"; Write-Host $l; Add-Content -Path $live -Value $l -Encoding utf8 }
-$base = 'lv_gold=96 lv_usb=1 sweetusb=2 sweetfps_osd=3 sweetfb_noconsole=1 sweetfb_offy=24 gpu=1 gpu_mhz=600 lv_ddr_khz=1804800 topaz_inject=/topaz/lib/libtopaz-inject.dylib,backboardd'
+$base = 'lv_gold=96 lv_usb=1 sweetusb=2 sweetfps_osd=3 sweetfb_noconsole=1 sweetfb_offy=24 gpu=1 gpu_mhz=600 lv_ddr_khz=1804800 lv_rpm_scale=1 topaz_inject=/topaz/lib/libtopaz-inject.dylib,backboardd'
 New-Item -ItemType Directory -Force "$P\test\flags" | Out-Null
 $n = 0
 foreach ($spec in $Specs) {

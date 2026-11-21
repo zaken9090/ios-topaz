@@ -5,7 +5,7 @@
 # PROF=1 also runs lv:prof backboardd during the home swipes.
 P=/c/Users/Vasyl/Desktop/Claude/Projects/Android-iOS
 T="$P/ios-lavender/lavender/tools/usblog.py"
-F="$P/dump/usblog-m45.txt"
+F="${LOG:-$P/dump/usblog-m45.txt}"
 LIVE="$P/dump/bench-live.txt"
 D="$(dirname "$0")"
 TAG=$1

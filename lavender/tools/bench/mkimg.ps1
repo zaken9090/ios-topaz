@@ -3,6 +3,7 @@ $ErrorActionPreference = 'Continue'
 $P = 'C:\Users\Vasyl\Desktop\Claude\Projects\Android-iOS'
 $base = 'debug=0xc serial=3 cpus=4 keepsyms=1 -noprogress rd=ufsroot0 ufsrw=1 rootrw=1 unentitled_ios_sim_launch=1 ignition_level=1 wdt_test=no_user_checkin launchd_unsecure_cache=1 wdt=-1 sweetcpufreq=0 sweetfb_direct=0 sweetfb_stayon=1 sweetchg=0 sweetbattery=0 sweetfb_hz=30 sweettouchdiag=1'
 if ($Extra -match '(^| )cpus=') { $base = $base -replace ' cpus=4', '' }
+if ($Extra -match '(^| )sweetfb_hz=') { $base = $base -replace ' sweetfb_hz=30', '' }
 $cmd = "$base $Extra"
 Write-Host "cmdline ($($cmd.Length)): $cmd"
 $payload = [IO.Path]::ChangeExtension($Out, '.bin')
