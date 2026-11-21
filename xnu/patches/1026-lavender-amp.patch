@@ -7,7 +7,9 @@ on a 1.37 GHz A53 as often as on a 2.2 GHz A73: eight cores were slower than fou
 With it, threads of the default and higher QoS go to P, background/utility and kernel threads
 to E (recommended_pset_type() without CLPC), and P spills to E only when it is busy.
 Without an E cluster (four gold cores) pcores_recommended() no longer touches the NULL
-ecore_set, and kernel threads stay on P (the display driver copies CPU-rendered frames).
+ecore_set, and kernel threads stay on P (the display driver copies CPU-rendered frames); with no E
+cluster every thread is P-recommended. Boot-args lv_amp_spill / lv_amp_steal / lv_amp_spillsteal
+tune spilling to and stealing by the E cluster.
 The ADT marks the cores 'P' / 'E' (mkadt_lavender.py --all8).
 
 ---
@@ -26,10 +28,27 @@ diff --git a/pexpert/pexpert/arm64/SWEET.h b/pexpert/pexpert/arm64/SWEET.h
  
  #define HAS_GIC_V3                1
 diff --git a/osfmk/kern/processor.c b/osfmk/kern/processor.c
-index aad9f3b..fae1089 100644
+index aad9f3b..6c615ec 100644
 --- a/osfmk/kern/processor.c
 +++ b/osfmk/kern/processor.c
-@@ -1682,9 +1682,16 @@ recommended_pset_type(thread_t thread)
+@@ -1647,6 +1647,16 @@ recommended_pset_type(thread_t thread)
+ 		return PSET_AMP_E;
+ 	}
+ 
++#if defined(ARM64_BOARD_CONFIG_SWEET)
++	{
++		/* lavender: no E cluster (four gold cores only): every thread is P-recommended */
++		extern processor_set_t ecore_set;
++		if (ecore_set == PROCESSOR_SET_NULL) {
++			return PSET_AMP_P;
++		}
++	}
++#endif
++
+ #if DEVELOPMENT || DEBUG
+ 	extern bool system_ecore_only;
+ 	extern int enable_task_set_cluster_type;
+@@ -1682,9 +1692,16 @@ recommended_pset_type(thread_t thread)
  	switch (recommendation) {
  	case CLUSTER_TYPE_SMP:
  	default:
@@ -62,3 +81,47 @@ index 93b6512..cc00755 100644
  	if (pcore_set->online_processor_count == 0) {
  		/* No pcores available */
  		return false;
+diff --git a/osfmk/kern/sched_amp_common.c b/osfmk/kern/sched_amp_common.c
+index 3c0974a..b84bd3c 100644
+--- a/osfmk/kern/sched_amp_common.c
++++ b/osfmk/kern/sched_amp_common.c
+@@ -36,6 +36,7 @@
+ #include <kern/machine.h>
+ #include <kern/misc_protos.h>
+ #include <kern/processor.h>
++#include <pexpert/pexpert.h>
+ #include <kern/queue.h>
+ #include <kern/sched.h>
+ #include <kern/sched_prim.h>
+@@ -58,17 +59,26 @@ processor_set_t pcore_set = NULL;
+  * Initialize the pcore_set and ecore_set globals which describe the
+  * P/E processor sets.
+  */
++/* Spill threshold load average is ncpus in pset + (sched_amp_spill_count/(1 << PSET_LOAD_FRACTIONAL_SHIFT) */
++int sched_amp_spill_count = 3;
++int sched_amp_idle_steal = 1;
++int sched_amp_spill_steal = 1;
++
+ void
+ sched_amp_init(void)
+ {
++	/*
++	 * lavender: boot-args to tune how readily P-recommended threads spill to and are stolen by
++	 * the E cluster (A53s at a third of the A73s' speed): lv_amp_spill=N (default 3),
++	 * lv_amp_steal=N (idle E cores steal past this load, default 1), lv_amp_spillsteal=N (1).
++	 * A large value (100000) turns that path off.
++	 */
++	PE_parse_boot_argn("lv_amp_spill", &sched_amp_spill_count, sizeof(sched_amp_spill_count));
++	PE_parse_boot_argn("lv_amp_steal", &sched_amp_idle_steal, sizeof(sched_amp_idle_steal));
++	PE_parse_boot_argn("lv_amp_spillsteal", &sched_amp_spill_steal, sizeof(sched_amp_spill_steal));
+ 	sched_timeshare_init();
+ }
+ 
+-/* Spill threshold load average is ncpus in pset + (sched_amp_spill_count/(1 << PSET_LOAD_FRACTIONAL_SHIFT) */
+-int sched_amp_spill_count = 3;
+-int sched_amp_idle_steal = 1;
+-int sched_amp_spill_steal = 1;
+-
+ /*
+  * We see performance gains from doing immediate IPIs to P-cores to run
+  * P-eligible threads and lesser P-E migrations from using deferred IPIs
