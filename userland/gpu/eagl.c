@@ -1637,10 +1637,10 @@ static const char vibrant_fragment[] =
     "  mediump vec4 layer = color * texture(texture0, texcoord / vec2(textureSize(texture0, 0)));\n"
     "  mediump vec4 behind = result, s = behind;\n"
     "  s.rgb = s.rgb / max(s.a, .005);\n"
-    "  s = s.r * colours[0] + s.g * colours[1] + s.b * colours[2] + s.a * colours[3] + colours[4];\n"
-    "  s.a = clamp(s.a, 0., 1.);\n"
-    "  s.rgb = clamp(s.rgb * s.a, 0., 1.);\n"
-    "  result = mix(behind, s, layer.a);\n"
+    "  s = clamp(s.r * colours[0] + s.g * colours[1] + s.b * colours[2] + s.a * colours[3] + colours[4], 0., 1.);\n"
+    "  s.rgb *= s.a;\n"
+    /* lavender (as ios-sailfish's sgl_vcm): premultiplied, never more colour than opacity; nothing where nothing was */
+    "  result = mix(behind, behind.a > 0. ? s : vec4(0.), layer.a);\n"
     "}\n";
 static const char masking_fragment[] =
     "#version 300 es\n"
@@ -1651,7 +1651,10 @@ static const char masking_fragment[] =
     "out lowp vec4 result;\n"
     "void main() {\n"
     "  mediump vec4 s = color * texture(texture0, texcoord / vec2(textureSize(texture0, 0)));\n"
-    "  result = clamp(s.r * colours[0] + s.g * colours[1] + s.b * colours[2] + s.a * colours[3] + colours[4], 0., 1.);\n"
+    "  mediump vec4 u = clamp(s.r * colours[0] + s.g * colours[1] + s.b * colours[2] + s.a * colours[3] + colours[4], 0., 1.);\n"
+    /* lavender (as ios-sailfish's sgl_cm4): premultiplied output, colour never above opacity - the bias
+     * lit transparent pixels and over-bright ones blended in as mint and cyan blocks behind blurs */
+    "  result = vec4(min(u.rgb, u.a), u.a);\n"
     "}\n";
 
 /*
@@ -2389,10 +2392,10 @@ static const char group_over_fragment[] =
     "  mediump vec4 layer = color * texture(texture0, texcoord * texmat.xy + texmat.zw);\n"
     "  mediump vec4 behind = result, s = behind;\n"
     "  s.rgb = s.rgb / max(s.a, .005);\n"
-    "  s = s.r * colours[0] + s.g * colours[1] + s.b * colours[2] + s.a * colours[3] + colours[4];\n"
-    "  s.a = clamp(s.a, 0., 1.);\n"
-    "  s.rgb = clamp(s.rgb * s.a, 0., 1.);\n"
-    "  result = mix(behind, s, layer.a);\n"
+    "  s = clamp(s.r * colours[0] + s.g * colours[1] + s.b * colours[2] + s.a * colours[3] + colours[4], 0., 1.);\n"
+    "  s.rgb *= s.a;\n"
+    /* lavender (as ios-sailfish's sgl_vcm): premultiplied, never more colour than opacity; nothing where nothing was */
+    "  result = mix(behind, behind.a > 0. ? s : vec4(0.), layer.a);\n"
     "}\n";
 static const char group_flat_fragment[] =
     "#version 300 es\n"
