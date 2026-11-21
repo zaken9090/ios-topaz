@@ -1,0 +1,69 @@
+From ad39b8c0fceb742f218b75a0b6307e1a5c1e5e8a Mon Sep 17 00:00:00 2001
+From: zaken9090 <zaken9090@users.noreply.github.com>
+Date: Sat, 21 Nov 2026 22:13:57 +0200
+Subject: [PATCH] lavender: lv:prof per CPU (NAME / other / kernel+idle) and,
+ per other process, how much ran on CPUs 4-7 (the E cluster with --all8)
+
+---
+ bsd/dev/sweet_usb.c | 17 ++++++++++++++++-
+ 1 file changed, 16 insertions(+), 1 deletion(-)
+
+diff --git a/bsd/dev/sweet_usb.c b/bsd/dev/sweet_usb.c
+index 71ca494..d3b166f 100644
+--- a/bsd/dev/sweet_usb.c
++++ b/bsd/dev/sweet_usb.c
+@@ -917,7 +917,8 @@ extern kern_return_t task_info(task_t, task_flavor_t, task_info_t, mach_msg_type
+ static struct { uint64_t key; uint32_t n; uint32_t pad; } lvp_pc[LVP_SLOTS], lvp_lr[LVP_SLOTS],
+     lvp_kpc[LVP_SLOTS], lvp_k1[LVP_SLOTS], lvp_k2[LVP_SLOTS];
+ static volatile uint32_t lvp_kern;              /* NAME's samples that were inside the kernel */
+-static struct { volatile int pid; volatile uint32_t n; } lvp_procs[48];   /* the other processes' samples */
++static struct { volatile int pid; volatile uint32_t n, ne; } lvp_procs[48];   /* the other processes' samples (ne: on CPUs 4-7) */
++static volatile uint32_t lvp_cpu[8][3];         /* lavender: per CPU: NAME, other processes, kernel/idle */
+ extern void *get_bsdtask_info(task_t);
+ static volatile task_t lvp_task;
+ static volatile uint32_t lvp_hits, lvp_other, lvp_idle, lvp_lost;
+@@ -945,6 +946,9 @@ lvp_sample(void *arg __unused)
+ {
+ 	thread_t th = current_thread();
+ 	task_t task = get_threadtask(th);
++	int cpu = cpu_number() & 7;
++
++	os_atomic_inc(&lvp_cpu[cpu][task == lvp_task ? 0 : task == kernel_task ? 2 : 1], relaxed);
+ 
+ 	if (task == lvp_task) {
+ 		arm_saved_state_t *ss = find_user_regs(th);
+@@ -980,6 +984,9 @@ lvp_sample(void *arg __unused)
+ 			if (have == pid || (have == 0 && os_atomic_cmpxchg(&lvp_procs[i].pid, 0, pid, relaxed)) ||
+ 			    lvp_procs[i].pid == pid) {
+ 				os_atomic_inc(&lvp_procs[i].n, relaxed);
++				if (cpu >= 4) {
++					os_atomic_inc(&lvp_procs[i].ne, relaxed);
++				}
+ 				break;
+ 			}
+ 		}
+@@ -1093,6 +1100,7 @@ lvp_thread(void *arg __unused, wait_result_t wr __unused)
+ 	bzero(lvp_k1, sizeof(lvp_k1));
+ 	bzero(lvp_k2, sizeof(lvp_k2));
+ 	bzero((void *)lvp_procs, sizeof(lvp_procs));
++	bzero((void *)lvp_cpu, sizeof(lvp_cpu));
+ 	lvp_kern = 0;
+ 	lvp_hits = lvp_other = lvp_idle = lvp_lost = 0;
+ 	lvp_task = TASK_NULL;
+@@ -1121,6 +1129,13 @@ lvp_thread(void *arg __unused, wait_result_t wr __unused)
+ 	printf("PROF %s: %llu rounds, %u samples: %s %u%%, other processes %u%%, kernel/idle %u%% (lost %u)\n",
+ 	    lvp_name, rounds, all, lvp_name, lvp_hits * 100 / (all ? all : 1), lvp_other * 100 / (all ? all : 1),
+ 	    lvp_idle * 100 / (all ? all : 1), lvp_lost);
++	for (int c = 0; c <= maxcpu && c < 8; c++) {
++		uint32_t n = lvp_cpu[c][0] + lvp_cpu[c][1] + lvp_cpu[c][2];
++		if (n != 0) {
++			printf("PROF cpu %d: %s %u%%, other processes %u%%, kernel/idle %u%% (%u samples)\n", c, lvp_name,
++			    lvp_cpu[c][0] * 100 / n, lvp_cpu[c][1] * 100 / n, lvp_cpu[c][2] * 100 / n, n);
++		}
++	}
+ 
+ 	/* dyld's image list: which library each address is in */
+ 	vm_map_t map = get_task_map(lvp_task);
+-- 
+2.56.0.windows.4
+
