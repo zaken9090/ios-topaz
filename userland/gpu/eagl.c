@@ -3250,6 +3250,47 @@ my_glFinish(void *context)
 	EAGL_LEAVE(e, 0x2d0);
 }
 
+/*
+ * lavender: CoreAnimation's blurs make a picture small (ds8), have its mip levels made
+ * (glGenerateMipmap) and sample them. The levels are made from what has been drawn into the
+ * level above: a flush first, so that the drawing is there (glmipflush=0: not). glnomip=1 turns
+ * the mipmapped minifying filters into plain ones (to see whether the levels are what is wrong).
+ */
+static int mip_flush = 1, no_mip;
+
+static void
+my_glGenerateMipmap(void *context, GLenum target)
+{
+	struct eagl *e = context;
+
+	EAGL_ENTER(e, 0x1550);
+	if (eagl_tracing) {
+		eagl_trace("glGenerateMipmap(%#x)\n", target);
+	}
+	clear_now(e);
+	if (mip_flush) {
+		glFlush();
+	}
+	glGenerateMipmap(target);
+	EAGL_LEAVE(e, 0x1550);
+}
+
+static void
+my_glTexParameteri(void *context, GLenum target, GLenum name, GLint value)
+{
+	struct eagl *e = context;
+
+	EAGL_ENTER(e, 0x988);
+	if (eagl_tracing) {
+		eagl_trace("glTexParameteri(%#x, %#x, %d)\n", target, name, value);
+	}
+	if (no_mip && name == 0x2801 && value >= 0x2700 && value <= 0x2703) {
+		value = (value & 1) ? 0x2601 : 0x2600;          /* LINEAR_MIPMAP_* -> LINEAR, NEAREST_MIPMAP_* -> NEAREST */
+	}
+	glTexParameteri(target, name, value);
+	EAGL_LEAVE(e, 0x988);
+}
+
 static void
 my_glFlush(void *context)
 {
@@ -4136,6 +4177,8 @@ install(void)
 		zero_on = strstr(arguments, "glzero=0") == NULL;
 		order_on = strstr(arguments, "glorder=0") == NULL;
 		sync_on = strstr(arguments, "glsync=0") == NULL;
+		mip_flush = strstr(arguments, "glmipflush=0") == NULL;
+		no_mip = strstr(arguments, "glnomip=1") != NULL;
 		group_vibrant_on = strstr(arguments, "glgroup=0") == NULL;
 		if ((argument = strstr(arguments, "gltrace_place=")) != NULL) {
 			char *end = (char *)argument + 14;
