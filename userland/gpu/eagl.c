@@ -291,6 +291,7 @@ struct eagl {
 		GLint size;
 		GLenum type;
 	} arrays[8];                    /* the vertex arrays, as given */
+	GLuint zero_fb;                 /* lavender: a framebuffer to clear a new empty texture with (zero_texture()) */
 	bool in_frame;
 	struct {                        /* what the line a frame gets with glframes=1 says (frame_end()) */
 		bool taken, boxed;      /* the first draw or clear into the display's picture seen; scissored */
@@ -3191,6 +3192,55 @@ my_glGetIntegerv(void *context, GLenum name, GLint *values)
 	EAGL_LEAVE(e, 0x348);
 }
 
+/*
+ * lavender: a texture made with no pixels is all zeros on iOS, and CoreAnimation counts on it: its
+ * blurs draw a picture smaller into a corner of a scratch texture and then sample a little past
+ * what they drew. Mesa hands out memory that held other pictures (its buffer cache, the GPU pool):
+ * the blur behind Spotlight, the notification shade, Control Center showed blocks of old pictures
+ * (mint, red, black). So a new empty texture is cleared to transparent black. glzero=0: not.
+ */
+#define GL_FRAMEBUFFER_BINDING_         0x8ca6
+#define GL_COLOR_WRITEMASK_             0x0c23
+static int zero_on = 1;
+static unsigned zero_count;
+
+static void
+zero_texture(struct eagl *e, GLuint texture)
+{
+	GLint was = 0;
+	GLfloat colour[4];
+	GLboolean mask[4], boxed;
+
+	if (texture == 0) {
+		return;
+	}
+	glGetIntegerv(GL_FRAMEBUFFER_BINDING_, &was);
+	if (e->zero_fb == 0) {
+		glGenFramebuffers(1, &e->zero_fb);
+	}
+	glBindFramebuffer(GL_FRAMEBUFFER, e->zero_fb);
+	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, texture, 0);
+	if (glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE) {
+		boxed = glIsEnabled(GL_SCISSOR_TEST);
+		glGetFloatv(GL_COLOR_CLEAR_VALUE, colour);
+		glGetBooleanv(GL_COLOR_WRITEMASK_, mask);
+		if (boxed) {
+			glDisable(GL_SCISSOR_TEST);
+		}
+		glColorMask(1, 1, 1, 1);
+		glClearColor(0, 0, 0, 0);
+		glClear(GL_COLOR_BUFFER_BIT);
+		glClearColor(colour[0], colour[1], colour[2], colour[3]);
+		glColorMask(mask[0], mask[1], mask[2], mask[3]);
+		if (boxed) {
+			glEnable(GL_SCISSOR_TEST);
+		}
+		zero_count++;
+	}
+	glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, 0, 0);
+	glBindFramebuffer(GL_FRAMEBUFFER, (GLuint)was);
+}
+
 static void
 my_glTexImage2D(void *context, GLenum target, GLint level, GLint internal, GLsizei width, GLsizei height, GLint border,
     GLenum format, GLenum type, const void *pixels)
@@ -3217,6 +3267,9 @@ my_glTexImage2D(void *context, GLenum target, GLint level, GLint internal, GLsiz
 	}
 	uint64_t began = slow_calls_us != 0 ? now_us() : 0;
 	glTexImage2D(target, level, (GLint)internal_format((GLenum)internal, format), width, height, border, format, type, pixels);
+	if (zero_on && pixels == NULL && target == GL_TEXTURE_2D && level == 0 && width > 0 && height > 0 && e->unit < 8) {
+		zero_texture(e, e->bound[e->unit]);
+	}
 	if (began != 0 && now_us() - began >= slow_calls_us) {
 		/* (with glslow=US: which pictures take long to hand over) */
 		say("tl: slow-tex %dx%d level %d format %#x type %#x%s %llu at %llu\n", width, height, level, format, type,
@@ -3853,6 +3906,7 @@ install(void)
 		trace_look = strstr(arguments, "gltrace_look=1") != NULL;
 		fetch_offered = strstr(arguments, "glfetch=0") == NULL;
 		solid_on = strstr(arguments, "glsolid=0") == NULL;
+		zero_on = strstr(arguments, "glzero=0") == NULL;
 		group_vibrant_on = strstr(arguments, "glgroup=0") == NULL;
 		if ((argument = strstr(arguments, "gltrace_place=")) != NULL) {
 			char *end = (char *)argument + 14;
