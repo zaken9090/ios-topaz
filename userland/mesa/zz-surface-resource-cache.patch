@@ -1,0 +1,73 @@
+lavender: one Mesa resource per IOSurface (as ios-sailfish's surf_res cache).
+
+CoreAnimation draws into a surface through one texture (attachImage) and samples it through
+another (texImageIOSurface). Each glEGLImageTargetTexture2DOES made a new pipe_resource of the same
+memory, and freedreno orders batches by resource: a batch that read the surface could run before
+the batch that wrote it, and the read got old pictures - blocks of mint, red and black behind
+Spotlight, the notification shade and Control Center. Now every import of a surface is the one
+resource (32 kept, least recently used dropped; a dropped one keeps nothing alive).
+
+--- a/src/gallium/targets/osmesa/osmesa_target.c
++++ b/src/gallium/targets/osmesa/osmesa_target.c
+@@ -29,6 +29,8 @@
+ #include "frontend/winsys_handle.h"
+ #include "pipe/p_screen.h"
+ #include "pipe/p_state.h"
++#include "util/u_inlines.h"
++#include "util/simple_mtx.h"
+ 
+ #ifdef GALLIUM_FREEDRENO
+ #include "freedreno/drm/freedreno_drm_public.h"
+@@ -95,7 +97,51 @@
+    handle.stride = s.row_bytes;
+    handle.offset = s.offset;
+    handle.size = s.size;
+-   return screen->resource_from_handle(screen, &templ, &handle, 0);
++   {
++      static struct {
++         uint32_t id, width, height, stride, offset;
++         uint64_t size, used;
++         struct pipe_screen *screen;
++         struct pipe_resource *res;
++      } kept[32];
++      static uint64_t tick;
++      static simple_mtx_t lock = SIMPLE_MTX_INITIALIZER;
++      struct pipe_resource *res = NULL;
++      int slot = -1, oldest = 0;
++
++      simple_mtx_lock(&lock);
++      for (int i = 0; i < 32; i++) {
++         if (kept[i].res && kept[i].id == surface && kept[i].screen == screen &&
++             kept[i].width == s.width && kept[i].height == s.height &&
++             kept[i].stride == s.row_bytes && kept[i].offset == s.offset && kept[i].size == s.size) {
++            slot = i;
++            break;
++         }
++         if (kept[i].used < kept[oldest].used)
++            oldest = i;
++      }
++      if (slot < 0) {
++         struct pipe_resource *made = screen->resource_from_handle(screen, &templ, &handle, 0);
++         if (!made) {
++            simple_mtx_unlock(&lock);
++            return NULL;
++         }
++         slot = oldest;
++         pipe_resource_reference(&kept[slot].res, NULL);
++         kept[slot].res = made;          /* (the table's reference) */
++         kept[slot].id = surface;
++         kept[slot].screen = screen;
++         kept[slot].width = s.width;
++         kept[slot].height = s.height;
++         kept[slot].stride = s.row_bytes;
++         kept[slot].offset = s.offset;
++         kept[slot].size = s.size;
++      }
++      kept[slot].used = ++tick;
++      pipe_resource_reference(&res, kept[slot].res);     /* (the caller's) */
++      simple_mtx_unlock(&lock);
++      return res;
++   }
+ #else
+    return NULL;
+ #endif
