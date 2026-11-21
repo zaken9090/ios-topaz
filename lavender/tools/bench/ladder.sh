@@ -4,14 +4,16 @@ P=/c/Users/Vasyl/Desktop/Claude/Projects/Android-iOS; S=/c/Users/Vasyl/AppData/L
 F=/c/Users/Vasyl/Desktop/miflash_unlock_en_7.6.727.43/fastboot.exe; L=$P/dump/usblog-m51.txt
 beep() { powershell.exe -c "[console]::Beep(880,300); [console]::Beep(1175,300)"; }
 cd $P
+k=0; one=$([ $# -gt 1 ] && echo 1)
 for img in "$@"; do
-	n=$(basename $img .img)
+	n=$(basename $img .img); k=$((k+1)); export TESTNO=${one:+$k}
 	$F devices | grep -q fastboot || python ios-lavender/lavender/tools/usblog.py --cmd fastboot >/dev/null
 	for i in $(seq 1 60); do $F devices | grep -q fastboot && break; sleep 2; done
 	$F devices | grep -q fastboot || { echo "NO FASTBOOT before $n"; beep; exit 1; }
+	echo "$(date +%T) [$n] =========START TEST${TESTNO:+ $TESTNO}=========" >> $P/dump/bench-live.txt; export LADDER=1
 	s=$(wc -c < $L); $F boot $img >/dev/null 2>&1
 	ok=0; for i in $(seq 1 75); do tail -c +$s $L | grep -aq LVSTAT && { ok=1; break; }; sleep 2; done
-	[ $ok = 1 ] || { echo "$n HUNG (no LVSTAT)"; echo "$(date +%T) [$n] HUNG: no LVSTAT in 150 s" >> $P/dump/bench-live.txt; beep; exit 1; }
+	[ $ok = 1 ] || { echo "$n HUNG (no LVSTAT)"; echo "$(date +%T) [$n] HUNG: no LVSTAT in 150 s" >> $P/dump/bench-live.txt; echo "$(date +%T) [$n] =========END TEST${TESTNO:+ $TESTNO}=========" >> $P/dump/bench-live.txt; beep; exit 1; }
 	sleep 40
 	LOG=$L bash $S/bench.sh $n 0 now 2>&1 | grep -E "RESULT|spotlight"
 done

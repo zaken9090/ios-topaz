@@ -26,6 +26,9 @@ fps() { awk '{ if ($3 > 2) { n++; f += $3; g += $5; w += $9; if ($3 > m) m = $3 
 part() { tail -c +$1 "$F" | head -c $(($2 - $1)) | grep -a -o 'LVSTAT F [0-9]* G [0-9]* C [0-9]* W [0-9]* T [0-9]*' | fps; }
 result() { say "RESULT $*"; echo "BENCH $TAG $*" >> "$P/dump/bench-results.txt"; }
 
+NUM=${TESTNO:+ $TESTNO}
+[ -z "$LADDER" ] && say "=========START TEST$NUM========="
+trap 'say "=========END TEST$NUM========="' EXIT
 s0=$(wc -c < "$F")
 if [ "$3" != now ]; then
 	say "waiting for the boot (first LVSTAT line)"
