@@ -548,6 +548,76 @@ image_of(struct eagl *e, GLuint texture)
 	return NULL;
 }
 
+/*
+ * lavender (after ios-sailfish): CoreAnimation draws into a surface through one texture
+ * (attachImage) and samples it through another (texImageIOSurface). To Mesa those are two
+ * resources of the same memory, and its batches are ordered by resource: the batch that read the
+ * surface could run before the one that wrote it, and the read got old pictures (blocks of mint,
+ * red, black behind Spotlight, the shade, Control Center). So a surface drawn into is marked, and
+ * a draw that samples a marked surface flushes first. And a draw that samples the very texture it
+ * draws into (CoreAnimation reads its destination that way; Apple's GPUs give what memory held
+ * when the pass began) flushes first too. glorder=0: neither.
+ */
+static int order_on = 1;
+static unsigned order_flushes;
+static uint32_t drawn_surfaces[16];
+static unsigned drawn_count;
+
+static void
+order_forget(void)
+{
+	drawn_count = 0;
+}
+
+static void
+order_before_draw(struct eagl *e)
+{
+	struct image *image;
+
+	if (!order_on) {
+		return;
+	}
+	for (unsigned unit = 0; unit < 4; unit++) {
+		GLuint texture = e->bound[unit];
+		bool flush = false;
+
+		if (texture == 0) {
+			continue;
+		}
+		if (texture == e->colour) {
+			flush = true;
+		} else if (drawn_count != 0 && (image = image_of(e, texture)) != NULL && !image->target && image->surface != NULL) {
+			uint32_t id = IOSurfaceGetID(image->surface);
+			for (unsigned i = 0; i < drawn_count; i++) {
+				if (drawn_surfaces[i] == id) {
+					flush = true;
+				}
+			}
+		}
+		if (flush) {
+			glFlush();
+			order_flushes++;
+			order_forget();
+			break;
+		}
+	}
+	if (e->colour != 0 && (image = image_of(e, e->colour)) != NULL && image->target && image->surface != NULL) {
+		uint32_t id = IOSurfaceGetID(image->surface);
+		bool have = false;
+		for (unsigned i = 0; i < drawn_count; i++) {
+			have |= drawn_surfaces[i] == id;
+		}
+		if (!have) {
+			if (drawn_count == 16) {
+				glFlush();              /* (too many to keep track of: the lot written out) */
+				order_flushes++;
+				drawn_count = 0;
+			}
+			drawn_surfaces[drawn_count++] = id;
+		}
+	}
+}
+
 static struct image *
 image_new(struct eagl *e, GLuint texture, IOSurfaceRef surface)
 {
@@ -2888,6 +2958,7 @@ my_glDrawArrays(void *context, GLenum mode, GLint first, GLsizei count)
 	if (trace_placing) {
 		trace_placed_draw(e, mode, 0, NULL, first, count);
 	}
+	order_before_draw(e);
 	if (group_draw_begin(e, enabled)) {
 		glDrawArrays(mode, first, count);
 		group_draw_end(e, enabled);
@@ -3055,6 +3126,7 @@ my_glDrawElements(void *context, GLenum mode, GLsizei count, GLenum type, const 
 	if (trace_placing) {
 		trace_placed_draw(e, mode, type, indices, 0, count);
 	}
+	order_before_draw(e);
 	int solid = solid_draw(e, mode, count, type, indices);
 	if (solid != 0) {
 		if (eagl_tracing) {
@@ -3107,6 +3179,7 @@ my_glFlush(void *context)
 	clear_now(e);
 	began = now_us();
 	glFlush();
+	order_forget();
 	e->flushing += now_us() - began;
 	frame_end(e, false);
 	EAGL_LEAVE(e, 0x2d8);
@@ -3907,6 +3980,7 @@ install(void)
 		fetch_offered = strstr(arguments, "glfetch=0") == NULL;
 		solid_on = strstr(arguments, "glsolid=0") == NULL;
 		zero_on = strstr(arguments, "glzero=0") == NULL;
+		order_on = strstr(arguments, "glorder=0") == NULL;
 		group_vibrant_on = strstr(arguments, "glgroup=0") == NULL;
 		if ((argument = strstr(arguments, "gltrace_place=")) != NULL) {
 			char *end = (char *)argument + 14;
