@@ -587,6 +587,7 @@ static void mirror_refresh(struct eagl *e, struct image *image);
 #endif
 static unsigned dump_frame, dump_first, dump_last;
 static GLint dump_vp_w, dump_vp_h, dump_vp_n;
+static unsigned dump_from;                      /* gldumpfrom=FRAME: gldumpvp only from that frame on */
 
 static void
 dump_draw(struct eagl *e)
@@ -598,7 +599,7 @@ dump_draw(struct eagl *e)
 
 	glGetIntegerv(GL_VIEWPORT, viewport);
 	/* gldumpvp=WxH,N: from the first draw into a viewport of that size on, N draws of that frame */
-	if (dump_vp_w != 0 && dump_frame == 0 && viewport[2] == dump_vp_w && viewport[3] == dump_vp_h) {
+	if (dump_vp_w != 0 && dump_frame == 0 && e->frames + 1 >= dump_from && viewport[2] == dump_vp_w && viewport[3] == dump_vp_h) {
 		dump_frame = e->frames + 1;
 		dump_first = e->draws;
 		dump_last = e->draws + dump_vp_n;
@@ -4223,6 +4224,9 @@ install(void)
 		sync_on = strstr(arguments, "glsync=0") == NULL;
 		mip_flush = strstr(arguments, "glmipflush=0") == NULL;
 		no_mip = strstr(arguments, "glnomip=1") != NULL;
+		if ((argument = strstr(arguments, "gldumpfrom=")) != NULL) {
+			dump_from = (unsigned)strtoul(argument + 11, NULL, 10);
+		}
 		if ((argument = strstr(arguments, "gldumpvp=")) != NULL) {
 			dump_vp_w = (GLint)strtoul(argument + 9, (char **)&argument, 10);
 			dump_vp_h = *argument == 'x' ? (GLint)strtoul(argument + 1, (char **)&argument, 10) : 0;
