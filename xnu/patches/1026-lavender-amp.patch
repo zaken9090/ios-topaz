@@ -1,0 +1,64 @@
+From: zaken9090 <zaken9090@users.noreply.github.com>
+Subject: [PATCH] lavender-1026: AMP again (gold A73 = P cluster, silver A53 = E cluster), as topaz-0141 had it
+
+XNU boots on the gold cluster now (1003) and can run all eight cores (ADT --all8). Without
+__ARM_AMP__ the scheduler saw one homogeneous cluster and put the window server's render thread
+on a 1.37 GHz A53 as often as on a 2.2 GHz A73: eight cores were slower than four in Settings.
+With it, threads of the default and higher QoS go to P, background/utility and kernel threads
+to E (recommended_pset_type() without CLPC), and P spills to E only when it is busy.
+Without an E cluster (four gold cores) pcores_recommended() no longer touches the NULL
+ecore_set, and kernel threads stay on P (the display driver copies CPU-rendered frames).
+The ADT marks the cores 'P' / 'E' (mkadt_lavender.py --all8).
+
+---
+
+diff --git a/pexpert/pexpert/arm64/SWEET.h b/pexpert/pexpert/arm64/SWEET.h
+--- a/pexpert/pexpert/arm64/SWEET.h
++++ b/pexpert/pexpert/arm64/SWEET.h
+@@ -43,8 +43,7 @@
+  * silver A53 = E cluster (ADT cluster-type). The Edge scheduler then keeps
+  * threads on P and spills to E only when P is busy (no CLPC recommends).
+  */
+-/* lavender: XNU boots on the silver A53 cluster only (gold runs at 1/4
+- * clock, see lavender/dump probes); one homogeneous cluster, no AMP. */
++#define __ARM_AMP__               1
+ #endif
+ 
+ #define HAS_GIC_V3                1
+diff --git a/osfmk/kern/processor.c b/osfmk/kern/processor.c
+index aad9f3b..fae1089 100644
+--- a/osfmk/kern/processor.c
++++ b/osfmk/kern/processor.c
+@@ -1682,9 +1682,16 @@ recommended_pset_type(thread_t thread)
+ 	switch (recommendation) {
+ 	case CLUSTER_TYPE_SMP:
+ 	default:
++#if !defined(ARM64_BOARD_CONFIG_SWEET)
+ 		if (get_threadtask(thread) == kernel_task) {
+ 			return PSET_AMP_E;
+ 		}
++#endif
++		/*
++		 * lavender: kernel threads stay on P too. The display driver copies every frame
++		 * the CPU renders (10 MB) and the HID/USB/GPU work loops run there; on a 1.37 GHz
++		 * A53 that made eight cores slower than four.
++		 */
+ 		return PSET_AMP_P;
+ 	case CLUSTER_TYPE_E:
+ 		return PSET_AMP_E;
+diff --git a/osfmk/kern/sched_amp.c b/osfmk/kern/sched_amp.c
+index 93b6512..cc00755 100644
+--- a/osfmk/kern/sched_amp.c
++++ b/osfmk/kern/sched_amp.c
+@@ -618,6 +618,11 @@ pcores_recommended(thread_t thread)
+ 		return false;
+ 	}
+ 
++	if (!ecore_set) {
++		/* lavender: no E cluster (four gold cores only): everything runs on P */
++		return true;
++	}
++
+ 	if (pcore_set->online_processor_count == 0) {
+ 		/* No pcores available */
+ 		return false;
