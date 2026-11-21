@@ -582,6 +582,9 @@ static void mirror_refresh(struct eagl *e, struct image *image);
  * the bottom-left 48 x 96 pixels of the framebuffer drawn into, as "gldump" lines of hex (RGBA),
  * a row a line (tools: dump-png.py makes pictures of them).
  */
+#ifndef GL_VIEWPORT
+#define GL_VIEWPORT                     0x0ba2
+#endif
 static unsigned dump_frame, dump_first, dump_last;
 
 static void
