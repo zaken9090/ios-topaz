@@ -1,0 +1,55 @@
+From b4b5493da25e09f4e396422277cb23f40e72ad2a Mon Sep 17 00:00:00 2001
+From: x <x@x>
+Date: Sat, 21 Nov 2026 04:54:53 +0200
+Subject: [PATCH] lavender: LVDDR - memcpy of 16 MB x4 at GPU start: how fast
+ the processor reaches DRAM (is the DDR vote real)
+
+---
+ iokit/Kernel/arm/TopazAdreno.cpp | 24 ++++++++++++++++++++++++
+ 1 file changed, 24 insertions(+)
+
+diff --git a/iokit/Kernel/arm/TopazAdreno.cpp b/iokit/Kernel/arm/TopazAdreno.cpp
+index 4af7acf..477153a 100644
+--- a/iokit/Kernel/arm/TopazAdreno.cpp
++++ b/iokit/Kernel/arm/TopazAdreno.cpp
+@@ -24,6 +24,7 @@
+ #include <pexpert/pexpert.h>
+ #include <kern/thread.h>
+ #include <mach/mach_time.h>
++#include <kern/clock.h>
+ 
+ extern "C" {
+ vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
+@@ -1621,6 +1622,29 @@ topaz_adreno_thread(__unused void *param, __unused wait_result_t wr_)
+ 	}
+ 	IOLockLock(hw_lock);
+ 	bool ok = hw_start();
++	/*
++	 * lavender: how fast the processor reaches DRAM (memcpy of 16 MB, cached, 4 times): if the
++	 * DDR vote (lv_ddr_khz) does nothing, this shows a slow bus, and the GPU waits on it too.
++	 */
++	{
++		IOBufferMemoryDescriptor *a = IOBufferMemoryDescriptor::inTaskWithOptions(kernel_task, kIODirectionInOut, 16u << 20, 4096);
++		IOBufferMemoryDescriptor *b = IOBufferMemoryDescriptor::inTaskWithOptions(kernel_task, kIODirectionInOut, 16u << 20, 4096);
++		if (a != NULL && b != NULL) {
++			uint8_t *pa_ = (uint8_t *)a->getBytesNoCopy(), *pb = (uint8_t *)b->getBytesNoCopy();
++			memset(pa_, 0x5a, 16u << 20);
++			memset(pb, 0xa5, 16u << 20);
++			uint64_t t0 = mach_absolute_time();
++			for (int i = 0; i < 4; i++) {
++				memcpy(i & 1 ? pa_ : pb, i & 1 ? pb : pa_, 16u << 20);
++			}
++			uint64_t ns;
++			absolutetime_to_nanoseconds(mach_absolute_time() - t0, &ns);
++			IOLog("LVDDR memcpy 64 MB in %llu us: %llu MB/s (read+write %llu MB/s), DDR vote %u kHz\n", ns / 1000,
++			    ns ? 64ull * 1000000000ull / ns : 0, ns ? 128ull * 1000000000ull / ns : 0, ddr_khz);
++		}
++		OSSafeReleaseNULL(a);
++		OSSafeReleaseNULL(b);
++	}
+ 	IOLockUnlock(hw_lock);
+ 	{
+ 		uint32_t diag = 0;
+-- 
+2.56.0.windows.4
+
