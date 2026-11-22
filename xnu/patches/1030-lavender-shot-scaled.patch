@@ -1,0 +1,28 @@
+From 968e6982b745a1a6de6c2150582f0ae11cb1eb14 Mon Sep 17 00:00:00 2001
+From: zaken9090 <zaken9090@users.noreply.github.com>
+Date: Sun, 22 Nov 2026 03:10:17 +0200
+Subject: [PATCH] lavender: lv:shot takes the presented size while VIG0 scales
+
+---
+ iokit/Kernel/arm/SweetFramebuffer.cpp | 5 +++--
+ 1 file changed, 3 insertions(+), 2 deletions(-)
+
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+index 168fd7b..bf91a56 100644
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -1236,8 +1236,9 @@ sweet_fb_shot_source(const uint8_t **va, uint32_t *stride, uint32_t *w, uint32_t
+ 	}
+ 	*va = p;
+ 	*stride = fb->fScanStride;
+-	*w = fb->fWidth;
+-	*h = fb->fHeight;
++	/* lavender (sweetfb_scale2): VIG0 fetches the presented size and scales it: the picture is that size */
++	*w = fb->fScaleOn ? fb->fLogicalW : fb->fWidth;
++	*h = fb->fScaleOn ? fb->fLogicalH : fb->fHeight;
+ 	return true;
+ }
+ 
+-- 
+2.56.0.windows.4
+
