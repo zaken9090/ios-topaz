@@ -225,7 +225,32 @@ topaz_inject(void)
 	if (name == NULL || strcmp(name, "backboardd") != 0 || access(TOPAZ_GL, R_OK) != 0) {
 		return;
 	}
-	if (sysctlbyname("kern.bootargs", args, &size, NULL, 0) == 0 && strstr(args, " gl=0") != NULL) {
+	if (sysctlbyname("kern.bootargs", args, &size, NULL, 0) != 0) {
+		args[0] = 0;
+	}
+	/*
+	 * lavender: boot-arg caenv=NAME=VALUE (as many as wanted) into the window server's
+	 * environment before CoreAnimation starts: its own switches (CA_DISABLE_DIRTY_REGIONS=1,
+	 * CA_DISABLE_BACKDROP_CACHE=1, CA_PRINT_BACKDROPS=1 ...; strings in the shared cache).
+	 * libtopaz-gl's glenv= comes too late for those that are read once at start.
+	 */
+	for (const char *argument = args; (argument = strstr(argument, "caenv=")) != NULL; argument += 6) {
+		char setting[128];
+		size_t length = strcspn(argument + 6, " ");
+		char *equals;
+
+		if ((argument != args && argument[-1] != ' ') || length == 0 || length >= sizeof(setting)) {
+			continue;
+		}
+		memcpy(setting, argument + 6, length);
+		setting[length] = 0;
+		if ((equals = strchr(setting, '=')) != NULL) {
+			*equals = 0;
+			setenv(setting, equals + 1, 1);
+			fprintf(stderr, "topaz-inject: caenv %s=%s\n", setting, equals + 1);
+		}
+	}
+	if (strstr(args, " gl=0") != NULL) {
 		syslog(LOG_NOTICE, "topaz: gl=0: CoreAnimation keeps its software renderer");
 		return;
 	}
