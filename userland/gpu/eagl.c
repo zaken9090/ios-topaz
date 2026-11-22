@@ -563,6 +563,8 @@ image_of(struct eagl *e, GLuint texture)
  * when the pass began) flushes first too. glorder=0: neither.
  */
 static int order_on = 1;
+/* glorder=2: no flush for a GL texture drawn into and then sampled (Mesa orders those itself), only for the FBO's own texture and an IOSurface drawn through another texture */
+static int order_mesa_textures;
 static unsigned order_flushes;
 /* glFlush calls in this frame, by who asked: CoreAnimation, glorder, a mirror copy, glGenerateMipmap, fbfetch */
 static unsigned fl_app, fl_order, fl_mirror, fl_mip, fl_fetch;
@@ -668,7 +670,7 @@ order_before_draw(struct eagl *e)
 		}
 		if (texture == e->colour) {
 			flush = true;
-		} else if (drawn_tex_count != 0) {
+		} else if (drawn_tex_count != 0 && !order_mesa_textures) {
 			/* a texture drawn into since the last flush (a display surface's frame read as the backdrop of a blur) */
 			for (unsigned i = 0; i < drawn_tex_count; i++) {
 				flush |= drawn_textures[i] == texture;
@@ -690,7 +692,7 @@ order_before_draw(struct eagl *e)
 			break;
 		}
 	}
-	if (e->colour != 0) {
+	if (e->colour != 0 && !order_mesa_textures) {
 		bool have = false;
 		for (unsigned i = 0; i < drawn_tex_count; i++) {
 			have |= drawn_textures[i] == e->colour;
@@ -4260,6 +4262,7 @@ install(void)
 		solid_on = strstr(arguments, "glsolid=0") == NULL;
 		zero_on = strstr(arguments, "glzero=0") == NULL;
 		order_on = strstr(arguments, "glorder=0") == NULL;
+		order_mesa_textures = strstr(arguments, "glorder=2") != NULL;
 		sync_on = strstr(arguments, "glsync=0") == NULL;
 		mip_flush = strstr(arguments, "glmipflush=0") == NULL;
 		no_mip = strstr(arguments, "glnomip=1") != NULL;
