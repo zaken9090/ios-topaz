@@ -1975,6 +1975,8 @@ redwood_gl_function_values(void *context, unsigned function, unsigned index, siz
 
 /* boot-arg glplain=0: leave such draws as they are; 2: also those without a texture; 3: the two with a colour matrix drawn plainly too */
 static int plain_draws = 1;
+/* boot-arg glno=vcm,c4p,ds8: those functions drawn plainly, each on its own (for telling which one a fault is in) */
+static int no_vcm, no_c4p, no_ds8;
 
 /*
  * The blur whose radius varies over the picture (the filter variableBlur with a mask: the strip
@@ -3059,8 +3061,8 @@ plain_draw_begin(struct eagl *e, GLint enabled[4])
 		trace_function_met = 1;
 	}
 	e->blended = 0;
-	if (e->bound[0] != 0 && plain_draws != 3 && function < 90 && ((function == FUNCTION_VIBRANT_MATRIX && fetch_offered) ||
-	    function == FUNCTION_MATRIX_PREMULTIPLIED) && function_given[function] == 20) {
+	if (e->bound[0] != 0 && plain_draws != 3 && function < 90 && ((function == FUNCTION_VIBRANT_MATRIX && fetch_offered && !no_vcm) ||
+	    (function == FUNCTION_MATRIX_PREMULTIPLIED && !no_c4p)) && function_given[function] == 20) {
 		bool vibrant = function == FUNCTION_VIBRANT_MATRIX;
 
 		if (vibrant && e->vibrant == 0) {
@@ -3106,7 +3108,7 @@ plain_draw_begin(struct eagl *e, GLint enabled[4])
 			return true;
 		}
 	}
-	if (e->bound[0] != 0 && plain_draws != 3 && function == FUNCTION_DOWNSAMPLE_8 && function_given[function] == 8) {
+	if (e->bound[0] != 0 && plain_draws != 3 && !no_ds8 && function == FUNCTION_DOWNSAMPLE_8 && function_given[function] == 8) {
 		if (e->box == 0) {
 			e->box = plain_program(box_fragment, "eight times smaller, sixteen samples");
 			e->box_matrix = glGetUniformLocation(e->box, "vertex_matrix");
@@ -4479,6 +4481,12 @@ install(void)
 		order_on = strstr(arguments, "glorder=0") == NULL;
 		order_mesa_textures = strstr(arguments, "glorder=2") != NULL;
 		cubic_on = strstr(arguments, "glcubic=1") != NULL;
+		if ((argument = strstr(arguments, "glno=")) != NULL) {
+			size_t n = strcspn(argument, " ");
+			no_vcm = memmem(argument, n, "vcm", 3) != NULL;
+			no_c4p = memmem(argument, n, "c4p", 3) != NULL;
+			no_ds8 = memmem(argument, n, "ds8", 3) != NULL;
+		}
 		sync_on = strstr(arguments, "glsync=0") == NULL;
 		mip_flush = strstr(arguments, "glmipflush=0") == NULL;
 		no_mip = strstr(arguments, "glnomip=1") != NULL;
