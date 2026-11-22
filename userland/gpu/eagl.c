@@ -660,7 +660,17 @@ dump_draw(struct eagl *e)
 			glBindFramebuffer(GL_READ_FRAMEBUFFER, e->reader);
 			glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, e->bound[0], 0);
 			for (GLint y = 0; y < dump_src[3]; y += dump_src[4]) {
-				glReadPixels(dump_src[0], dump_src[1] + y, dump_src[2], 1, GL_RGBA, GL_UNSIGNED_BYTE, row);
+				/* (a display surface's texture is BGRA: read in that format, which the framebuffer offers) */
+				GLint format = GL_RGBA, kind = GL_UNSIGNED_BYTE;
+
+				glGetIntegerv(0x8b9b, &format);         /* GL_IMPLEMENTATION_COLOR_READ_FORMAT */
+				glGetIntegerv(0x8b9a, &kind);           /* GL_IMPLEMENTATION_COLOR_READ_TYPE */
+				memset(row, 0xee, (size_t)dump_src[2] * 4);
+				glReadPixels(dump_src[0], dump_src[1] + y, dump_src[2], 1, (GLenum)format, (GLenum)kind, row);
+				if (y == 0) {
+					say("gldump %u %u src format %#x %#x status %#x error %#x\n", dump_frame, e->draws, format, kind,
+					    glCheckFramebufferStatus(GL_READ_FRAMEBUFFER), glGetError());
+				}
 				for (GLsizei i = 0; i < n; i++) {
 					snprintf(line + 8 * i, 9, "%02x%02x%02x%02x", row[i * dump_src[4] * 4], row[i * dump_src[4] * 4 + 1],
 					    row[i * dump_src[4] * 4 + 2], row[i * dump_src[4] * 4 + 3]);
