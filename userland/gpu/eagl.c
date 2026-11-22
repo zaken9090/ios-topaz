@@ -1473,6 +1473,7 @@ static struct { uintptr_t pc; uint32_t n; } prof_callers[4096];
 static uint32_t prof_kernel, prof_kernel_unwound;
 static uintptr_t prof_k_lo, prof_k_hi;          /* libsystem_kernel's text, roughly (from dladdr of mach_msg) */
 static uintptr_t prof_stack_lo, prof_stack_hi;  /* the drawing thread's stack: frame pointers outside it are not followed */
+static uintptr_t prof_io_lo, prof_io_hi;        /* IOKit's text: a call into the driver is traced one more step, to who made it */
 
 static void
 prof_add_caller(uintptr_t pc)
@@ -1531,6 +1532,10 @@ prof_main(void *arg)
 			prof_k_lo = (uintptr_t)info.dli_fbase;
 			prof_k_hi = prof_k_lo + 0x40000;        /* (its text is well under 256 KB) */
 		}
+		if (dladdr((const void *)IOConnectCallMethod, &info)) {
+			prof_io_lo = (uintptr_t)info.dli_fbase;
+			prof_io_hi = prof_io_lo + 0x60000;
+		}
 		pthread_t pt = pthread_from_mach_thread_np(prof_target);
 		if (pt != NULL) {
 			prof_stack_hi = (uintptr_t)pthread_get_stackaddr_np(pt);
@@ -1554,7 +1559,7 @@ prof_main(void *arg)
 					uintptr_t ret = (uintptr_t)arm_thread_state64_get_lr(st), fp = (uintptr_t)arm_thread_state64_get_fp(st);
 
 					prof_kernel++;
-					for (int d = 0; d < 8 && ret >= prof_k_lo && ret < prof_k_hi && fp >= prof_stack_lo && fp + 16 <= prof_stack_hi && (fp & 7) == 0; d++) {
+					for (int d = 0; d < 12 && ((ret >= prof_k_lo && ret < prof_k_hi) || (ret >= prof_io_lo && ret < prof_io_hi)) && fp >= prof_stack_lo && fp + 16 <= prof_stack_hi && (fp & 7) == 0; d++) {
 						ret = ((uintptr_t *)fp)[1];
 						fp = ((uintptr_t *)fp)[0];
 					}
