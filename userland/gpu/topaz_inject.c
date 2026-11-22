@@ -250,6 +250,16 @@ topaz_inject(void)
 			fprintf(stderr, "topaz-inject: caenv %s=%s\n", setting, equals + 1);
 		}
 	}
+	/*
+	 * lavender: Mesa draws straight into memory (FD_MESA_DEBUG=sysmem) unless told otherwise:
+	 * CoreAnimation's ~20 flushes a frame each cost freedreno a whole tiled (GMEM) pass on the
+	 * processor; without tiles home went 36 -> 45 fps, Settings 26 -> 29 (2026-11-22). Boot-arg
+	 * glgmem=1: tiles again.
+	 */
+	if (strstr(args, "glgmem=1") == NULL && getenv("FD_MESA_DEBUG") == NULL) {
+		setenv("FD_MESA_DEBUG", "sysmem", 1);
+		fprintf(stderr, "topaz-inject: FD_MESA_DEBUG=sysmem (glgmem=1: tiles)\n");
+	}
 	if (strstr(args, " gl=0") != NULL) {
 		syslog(LOG_NOTICE, "topaz: gl=0: CoreAnimation keeps its software renderer");
 		return;
