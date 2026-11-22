@@ -605,6 +605,7 @@ static void live_drawn(struct image *image);
 #endif
 static unsigned dump_frame, dump_first, dump_last;
 static GLint dump_vp_w, dump_vp_h, dump_vp_n;
+static GLint dump_src[5];                       /* gldumpsrc=X,Y,W,H,STEP: also that part of the draw's source texture (every STEP-th pixel) */
 static unsigned dump_every;                     /* gldumpevery=K: gldumpvp again K frames after the last */
 static unsigned dump_from;                      /* gldumpfrom=FRAME: gldumpvp only from that frame on */
 
@@ -642,6 +643,33 @@ dump_draw(struct eagl *e)
 			snprintf(line + 2 * i, 3, "%02x", pixels[i]);
 		}
 		say("gldump %u %u row %d %s\n", dump_frame, e->draws, y, line);
+	}
+	if (dump_src[2] > 0 && dump_src[4] > 0 && e->bound[0] != 0) {
+		GLint read = 0;
+		GLsizei n = dump_src[2] / dump_src[4];
+		unsigned char *row = malloc((size_t)dump_src[2] * 4);
+
+		if (n > 26) {
+			n = 26;
+		}
+		if (row != NULL) {
+			glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &read);
+			if (e->reader == 0) {
+				glGenFramebuffers(1, &e->reader);
+			}
+			glBindFramebuffer(GL_READ_FRAMEBUFFER, e->reader);
+			glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, e->bound[0], 0);
+			for (GLint y = 0; y < dump_src[3]; y += dump_src[4]) {
+				glReadPixels(dump_src[0], dump_src[1] + y, dump_src[2], 1, GL_RGBA, GL_UNSIGNED_BYTE, row);
+				for (GLsizei i = 0; i < n; i++) {
+					snprintf(line + 8 * i, 9, "%02x%02x%02x%02x", row[i * dump_src[4] * 4], row[i * dump_src[4] * 4 + 1],
+					    row[i * dump_src[4] * 4 + 2], row[i * dump_src[4] * 4 + 3]);
+				}
+				say("gldump %u %u src %d %s\n", dump_frame, e->draws, dump_src[1] + y, line);
+			}
+			glBindFramebuffer(GL_READ_FRAMEBUFFER, (GLuint)read);
+			free(row);
+		}
 	}
 }
 
@@ -4571,6 +4599,16 @@ install(void)
 		no_mip = strstr(arguments, "glnomip=1") != NULL;
 		if ((argument = strstr(arguments, "gldumpfrom=")) != NULL) {
 			dump_from = (unsigned)strtoul(argument + 11, NULL, 10);
+		}
+		if ((argument = strstr(arguments, "gldumpsrc=")) != NULL) {
+			argument += 10;
+			for (int k = 0; k < 5; k++) {
+				dump_src[k] = (GLint)strtol(argument, (char **)&argument, 10);
+				if (*argument != ',') {
+					break;
+				}
+				argument++;
+			}
 		}
 		if ((argument = strstr(arguments, "gldumpevery=")) != NULL) {
 			dump_every = (unsigned)strtoul(argument + 12, NULL, 10);
