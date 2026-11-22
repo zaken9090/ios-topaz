@@ -1,0 +1,94 @@
+From 255ca415237b485dbe54bbfe18bef5af03f89261 Mon Sep 17 00:00:00 2001
+From: zaken9090 <zaken9090@users.noreply.github.com>
+Date: Sun, 22 Nov 2026 08:15:33 +0200
+Subject: [PATCH] lavender: sweetucstat=1 - user client calls by class and
+ selector every 5 s (count, time inside)
+
+
+diff --git a/iokit/Kernel/IOUserClient.cpp b/iokit/Kernel/IOUserClient.cpp
+index 163fce1..091274b 100644
+--- a/iokit/Kernel/IOUserClient.cpp
++++ b/iokit/Kernel/IOUserClient.cpp
+@@ -6437,10 +6437,72 @@ is_io_device_tree_entry_exists_with_name(
+ }
+ } /* extern "C" */
+ 
++/*
++ * lavender: boot-arg sweetucstat=1 - every 5 s, the user client calls of the last 5 s by class and
++ * selector: how many and the time inside the call (where a renderer's mach_msg time goes).
++ */
++#define LV_UC_SLOTS 64
++static struct {
++	const OSMetaClass *meta;
++	uint32_t selector;
++	uint32_t count;
++	uint64_t ns;
++} lv_uc[LV_UC_SLOTS];
++static int lv_uc_on = -1;
++static volatile UInt64 lv_uc_since;
++
++static void
++lv_uc_note(const OSMetaClass *meta, uint32_t selector, uint64_t t0, uint64_t t1)
++{
++	uint64_t ns;
++	absolutetime_to_nanoseconds(t1 - t0, &ns);
++	unsigned h = (unsigned)(((uintptr_t)meta >> 4) * 31 + selector) % LV_UC_SLOTS;
++	for (unsigned i = 0; i < 8; i++) {
++		unsigned k = (h + i) % LV_UC_SLOTS;
++		if (lv_uc[k].meta == meta && lv_uc[k].selector == selector) {
++			OSAddAtomic(1, (SInt32 *)&lv_uc[k].count);
++			OSAddAtomic64((SInt64)ns, (SInt64 *)&lv_uc[k].ns);
++			break;
++		}
++		if (lv_uc[k].meta == NULL && OSCompareAndSwapPtr(NULL, (void *)meta, (void * volatile *)&lv_uc[k].meta)) {
++			lv_uc[k].selector = selector;
++			OSAddAtomic(1, (SInt32 *)&lv_uc[k].count);
++			OSAddAtomic64((SInt64)ns, (SInt64 *)&lv_uc[k].ns);
++			break;
++		}
++	}
++	uint64_t since = lv_uc_since, el;
++	if (since == 0) {
++		OSCompareAndSwap64(0, t1, &lv_uc_since);
++		return;
++	}
++	absolutetime_to_nanoseconds(t1 - since, &el);
++	if (el < 5000000000ull || !OSCompareAndSwap64(since, t1, &lv_uc_since)) {
++		return;
++	}
++	for (unsigned k = 0; k < LV_UC_SLOTS; k++) {
++		if (lv_uc[k].meta != NULL && lv_uc[k].count != 0) {
++			IOLog("LVUC %s sel %u: %u calls, %llu us in all, %llu us each\n", lv_uc[k].meta->getClassName(), lv_uc[k].selector,
++			    lv_uc[k].count, lv_uc[k].ns / 1000, lv_uc[k].ns / 1000 / lv_uc[k].count);
++			lv_uc[k].count = 0;
++			lv_uc[k].ns = 0;
++		}
++	}
++}
++
+ IOReturn
+ IOUserClient::callExternalMethod(uint32_t selector, IOExternalMethodArguments * args)
+ {
+ 	IOReturn ret;
++	uint64_t lv_t0 = 0;
++
++	if (lv_uc_on < 0) {
++		uint32_t v = 0;
++		lv_uc_on = PE_parse_boot_argn("sweetucstat", &v, sizeof(v)) && v != 0;
++	}
++	if (lv_uc_on) {
++		lv_t0 = mach_absolute_time();
++	}
+ 
+ 	if (defaultLocking) {
+ 		if (defaultLockingSingleThreadExternalMethod) {
+@@ -6457,6 +6519,9 @@ IOUserClient::callExternalMethod(uint32_t selector, IOExternalMethodArguments *
+ 	if (defaultLocking) {
+ 		IORWLockUnlock(&lock);
+ 	}
++	if (lv_t0 != 0) {
++		lv_uc_note(getMetaClass(), selector, lv_t0, mach_absolute_time());
++	}
+ 	return ret;
+ }
+ 
