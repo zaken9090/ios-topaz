@@ -158,8 +158,8 @@ def build(seed=None):
             ph(),
             ('device_type', cstr('display-subsystem')),
             ('compatible', cstr('sweet,display')),
-            ('canvas-width', u32(750 if '--scale2' in sys.argv else 1125)),
-            ('canvas-height', u32(1624 if '--scale2' in sys.argv else 2436)),
+            ('canvas-width', u32(828 if '--xr' in sys.argv else 750 if '--scale2' in sys.argv else 1125)),
+            ('canvas-height', u32(1792 if '--xr' in sys.argv else 1624 if '--scale2' in sys.argv else 2436)),
         ])])
 
     fbcon = node('sweet-fbcon', [

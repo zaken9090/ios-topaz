@@ -1,0 +1,32 @@
+From 3a2e8a82a2fb3effa8de595a6a41e61f6fbbc573 Mon Sep 17 00:00:00 2001
+From: zaken9090 <zaken9090@users.noreply.github.com>
+Date: Sun, 22 Nov 2026 03:29:27 +0200
+Subject: [PATCH] lavender: sweetfb_scale2=2 - 828x1792 (the iPhone XR's
+ 414x896 pt @2x), which UIKit has a status bar for
+
+---
+ iokit/Kernel/arm/SweetFramebuffer.cpp | 8 ++++++--
+ 1 file changed, 6 insertions(+), 2 deletions(-)
+
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+index bf91a56..f398c83 100644
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -348,8 +348,12 @@ AppleCLCD::start(IOService *provider)
+ 		PE_parse_boot_argn("sweetfb_scale2", &scale2, sizeof(scale2));
+ 		if (scale2 != 0 && !native) {
+ 			fScaled = true;
+-			fLogicalW = 750;
+-			fLogicalH = 1624;
++			/*
++			 * 1: 750x1624 (375x812 pt, the iPhone X's points: UIKit has no status bar for that at 2x - a red
++			 * "rdar://45025538" bar); 2: 828x1792 (414x896 pt @2x, the iPhone XR's: _UIStatusBarVisualProvider_Split828)
++			 */
++			fLogicalW = scale2 == 2 ? 828 : 750;
++			fLogicalH = scale2 == 2 ? 1792 : 1624;
+ 		}
+ 	}
+ 	/* x rounded down to 4 pixels: the panel window must start 16-byte aligned (MDP fetch) */
+-- 
+2.56.0.windows.4
+
