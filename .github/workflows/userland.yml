@@ -40,7 +40,7 @@ jobs:
           mkdir -p build-mesa
           # the script puts /opt/homebrew's bison first; on Intel Homebrew lives in /usr/local
           export PATH="$(brew --prefix bison)/bin:$PATH"
-          bash -x mk-mesa-mac.sh || { grep -n -B3 -A25 "error:|FAILED:" build-mesa/ninja.log 2>/dev/null | head -150; tail -20 build-mesa/meson-setup.log 2>/dev/null; exit 1; }
+          bash -x mk-mesa-mac.sh || { grep -n -E -B3 -A25 "error:|FAILED:" build-mesa/ninja.log 2>/dev/null | head -150; tail -20 build-mesa/meson-setup.log 2>/dev/null; exit 1; }
           ls -la build-mesa/out
 
       - name: EAGL library and loader
