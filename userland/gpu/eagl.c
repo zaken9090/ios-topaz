@@ -645,40 +645,58 @@ dump_draw(struct eagl *e)
 		say("gldump %u %u row %d %s\n", dump_frame, e->draws, y, line);
 	}
 	if (dump_src[2] > 0 && dump_src[4] > 0 && e->bound[0] != 0) {
-		GLint read = 0;
-		GLsizei n = dump_src[2] / dump_src[4];
-		unsigned char *row = malloc((size_t)dump_src[2] * 4);
+		/*
+		 * The source's part, made small by the GPU (every STEP-th pixel) into a texture of ours in
+		 * RGBA and read from there: read straight from a display surface's BGRA texture, glReadPixels
+		 * wrote nothing (and said nothing).
+		 */
+		static GLuint small, small_fb;
+		GLint read = 0, draw = 0, bound = 0;
+		GLsizei n = dump_src[2] / dump_src[4], m = dump_src[3] / dump_src[4];
+		unsigned char row[26 * 4];
+		GLboolean boxed = glIsEnabled(GL_SCISSOR_TEST);
 
 		if (n > 26) {
 			n = 26;
 		}
-		if (row != NULL) {
-			glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &read);
-			if (e->reader == 0) {
-				glGenFramebuffers(1, &e->reader);
+		if (m > 64) {
+			m = 64;
+		}
+		glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &read);
+		glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &draw);
+		glGetIntegerv(GL_TEXTURE_BINDING_2D, &bound);
+		if (small == 0) {
+			glGenTextures(1, &small);
+			glBindTexture(GL_TEXTURE_2D, small);
+			glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 26, 64, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+			glGenFramebuffers(1, &small_fb);
+			glBindFramebuffer(GL_DRAW_FRAMEBUFFER, small_fb);
+			glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, small, 0);
+			glBindTexture(GL_TEXTURE_2D, (GLuint)bound);
+		}
+		if (e->reader == 0) {
+			glGenFramebuffers(1, &e->reader);
+		}
+		glBindFramebuffer(GL_READ_FRAMEBUFFER, e->reader);
+		glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, e->bound[0], 0);
+		glBindFramebuffer(GL_DRAW_FRAMEBUFFER, small_fb);
+		glDisable(GL_SCISSOR_TEST);
+		glBlitFramebuffer(dump_src[0], dump_src[1], dump_src[0] + n * dump_src[4], dump_src[1] + m * dump_src[4], 0, 0, n, m,
+		    GL_COLOR_BUFFER_BIT, GL_NEAREST);
+		say("gldump %u %u src blit error %#x\n", dump_frame, e->draws, glGetError());
+		glBindFramebuffer(GL_READ_FRAMEBUFFER, small_fb);
+		for (GLsizei y = 0; y < m; y++) {
+			memset(row, 0xee, sizeof(row));
+			glReadPixels(0, y, n, 1, GL_RGBA, GL_UNSIGNED_BYTE, row);
+			for (GLsizei i = 0; i < n; i++) {
+				snprintf(line + 8 * i, 9, "%02x%02x%02x%02x", row[i * 4], row[i * 4 + 1], row[i * 4 + 2], row[i * 4 + 3]);
 			}
-			glBindFramebuffer(GL_READ_FRAMEBUFFER, e->reader);
-			glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, e->bound[0], 0);
-			for (GLint y = 0; y < dump_src[3]; y += dump_src[4]) {
-				/* (a display surface's texture is BGRA: read in that format, which the framebuffer offers) */
-				GLint format = GL_RGBA, kind = GL_UNSIGNED_BYTE;
-
-				glGetIntegerv(0x8b9b, &format);         /* GL_IMPLEMENTATION_COLOR_READ_FORMAT */
-				glGetIntegerv(0x8b9a, &kind);           /* GL_IMPLEMENTATION_COLOR_READ_TYPE */
-				memset(row, 0xee, (size_t)dump_src[2] * 4);
-				glReadPixels(dump_src[0], dump_src[1] + y, dump_src[2], 1, (GLenum)format, (GLenum)kind, row);
-				if (y == 0) {
-					say("gldump %u %u src format %#x %#x status %#x error %#x\n", dump_frame, e->draws, format, kind,
-					    glCheckFramebufferStatus(GL_READ_FRAMEBUFFER), glGetError());
-				}
-				for (GLsizei i = 0; i < n; i++) {
-					snprintf(line + 8 * i, 9, "%02x%02x%02x%02x", row[i * dump_src[4] * 4], row[i * dump_src[4] * 4 + 1],
-					    row[i * dump_src[4] * 4 + 2], row[i * dump_src[4] * 4 + 3]);
-				}
-				say("gldump %u %u src %d %s\n", dump_frame, e->draws, dump_src[1] + y, line);
-			}
-			glBindFramebuffer(GL_READ_FRAMEBUFFER, (GLuint)read);
-			free(row);
+			say("gldump %u %u src %d %s\n", dump_frame, e->draws, dump_src[1] + y * dump_src[4], line);
+		}
+		glBindFramebuffer(GL_READ_FRAMEBUFFER, (GLuint)read);
+		glBindFramebuffer(GL_DRAW_FRAMEBUFFER, (GLuint)draw);
+		if (boxed) {
+			glEnable(GL_SCISSOR_TEST);
 		}
 	}
 }
