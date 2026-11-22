@@ -588,6 +588,9 @@ static struct { GLint fb, scale; } program_fetch[4096];  /* programs that read t
 
 static void mirror_refresh(struct eagl *e, struct image *image);
 static bool live_sync(struct eagl *e, struct image *image);
+static unsigned live_syncs, live_reads_target, live_reads_shown, live_reads_other;
+#define SURFACE_GENS 4096
+static GLuint surface_writer[SURFACE_GENS];
 static void live_drawn(struct image *image);
 
 /*
@@ -659,7 +662,22 @@ order_before_draw(struct eagl *e)
 		}
 		for (unsigned unit = 0; unit < 4; unit++) {
 			if (e->bound[unit] != 0 && e->bound[unit] != e->colour) {
-				touched |= live_sync(e, image_of(e, e->bound[unit]));
+				struct image *read = image_of(e, e->bound[unit]);
+
+				if (read != NULL && read->surface != NULL) {
+					uint32_t id = IOSurfaceGetID(read->surface) % SURFACE_GENS;
+
+					if (surface_writer[id] != 0 && surface_writer[id] != read->texture) {
+						if (read->target) {
+							live_reads_target++;
+						} else {
+							live_reads_shown++;
+						}
+					}
+				} else {
+					live_reads_other++;
+				}
+				touched |= live_sync(e, read);
 			}
 		}
 		if (e->colour != 0 && (image = image_of(e, e->colour)) != NULL) {
@@ -1059,7 +1077,7 @@ static uint32_t surface_gen[SURFACE_GENS];
  */
 static uint32_t surface_ver[SURFACE_GENS];
 static GLuint surface_writer[SURFACE_GENS];
-static unsigned live_syncs;
+static unsigned live_syncs, live_reads_target, live_reads_shown, live_reads_other;
 
 static void
 mirror_refresh(struct eagl *e, struct image *image)
@@ -1427,8 +1445,11 @@ frame_end(struct eagl *e, bool finished)
 		    after - waited, e->attaching);
 		say("redwood-gl: frame %u flushes: %u CA, %u order, %u mirror, %u mip, %u fetch; %llu us flushing\n", e->frames,
 		    fl_app, fl_order, fl_mirror, fl_mip, fl_fetch, e->flushing);
+		say("redwood-gl: frame %u live: %u syncs; reads of a surface drawn into through another texture: %u targets, %u shown, %u other\n",
+		    e->frames, live_syncs, live_reads_target, live_reads_shown, live_reads_other);
 	}
 	fl_app = fl_order = fl_mirror = fl_mip = fl_fetch = 0;
+	live_syncs = live_reads_target = live_reads_shown = live_reads_other = 0;
 	if (e->frames == 30 || e->frames % 200 == 0) {
 		summary(e);
 	}
