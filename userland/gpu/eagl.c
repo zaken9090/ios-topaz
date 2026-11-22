@@ -1469,6 +1469,29 @@ static struct { uintptr_t pc; uint32_t n; } prof_tab[PROF_SLOTS];
 static uint32_t prof_total, prof_lost, prof_secs, prof_delay;
 static mach_port_t prof_target;
 static int prof_started;
+static struct { uintptr_t pc; uint32_t n; } prof_callers[4096];
+static uint32_t prof_kernel, prof_kernel_unwound;
+static uintptr_t prof_k_lo, prof_k_hi;          /* libsystem_kernel's text, roughly (from dladdr of mach_msg) */
+static uintptr_t prof_stack_lo, prof_stack_hi;  /* the drawing thread's stack: frame pointers outside it are not followed */
+
+static void
+prof_add_caller(uintptr_t pc)
+{
+	uint32_t h = (uint32_t)((pc >> 2) * 2654435761u) & 4095;
+
+	for (uint32_t i = 0; i < 64; i++) {
+		uint32_t k = (h + i) & 4095;
+		if (prof_callers[k].pc == pc) {
+			prof_callers[k].n++;
+			return;
+		}
+		if (prof_callers[k].pc == 0) {
+			prof_callers[k].pc = pc;
+			prof_callers[k].n = 1;
+			return;
+		}
+	}
+}
 
 static void
 prof_add(uintptr_t pc)
@@ -1502,6 +1525,18 @@ prof_main(void *arg)
 {
 	(void)arg;
 	sleep(prof_delay);
+	{
+		Dl_info info;
+		if (dladdr((const void *)mach_msg, &info)) {
+			prof_k_lo = (uintptr_t)info.dli_fbase;
+			prof_k_hi = prof_k_lo + 0x40000;        /* (its text is well under 256 KB) */
+		}
+		pthread_t pt = pthread_from_mach_thread_np(prof_target);
+		if (pt != NULL) {
+			prof_stack_hi = (uintptr_t)pthread_get_stackaddr_np(pt);
+			prof_stack_lo = prof_stack_hi - pthread_get_stacksize_np(pt);
+		}
+	}
 	say("redwood-gl: glprof: sampling the drawing thread for %u s\n", prof_secs);
 	uint64_t end = now_us() + (uint64_t)prof_secs * 1000000u;
 	while (now_us() < end) {
@@ -1510,8 +1545,24 @@ prof_main(void *arg)
 
 		if (thread_suspend(prof_target) == KERN_SUCCESS) {
 			if (thread_get_state(prof_target, ARM_THREAD_STATE64, (thread_state_t)&st, &cnt) == KERN_SUCCESS) {
-				prof_add((uintptr_t)arm_thread_state64_get_pc(st));
+				uintptr_t pc = (uintptr_t)arm_thread_state64_get_pc(st);
+
+				prof_add(pc);
 				prof_total++;
+				if (pc >= prof_k_lo && pc < prof_k_hi) {
+					/* in a system call: who made it (lr first, then the frame chain) */
+					uintptr_t ret = (uintptr_t)arm_thread_state64_get_lr(st), fp = (uintptr_t)arm_thread_state64_get_fp(st);
+
+					prof_kernel++;
+					for (int d = 0; d < 8 && ret >= prof_k_lo && ret < prof_k_hi && fp >= prof_stack_lo && fp + 16 <= prof_stack_hi && (fp & 7) == 0; d++) {
+						ret = ((uintptr_t *)fp)[1];
+						fp = ((uintptr_t *)fp)[0];
+					}
+					if (ret != 0 && !(ret >= prof_k_lo && ret < prof_k_hi)) {
+						prof_add_caller(ret & 0x0000ffffffffffffull);
+						prof_kernel_unwound++;
+					}
+				}
 			}
 			thread_resume(prof_target);
 		}
@@ -1575,6 +1626,45 @@ prof_main(void *arg)
 			at += snprintf(line + at, sizeof(line) - (size_t)at, " %x:%u", rows[j][0], rows[j][2]);
 		}
 		say("%s\n", line);
+	}
+	/* system calls by who made them */
+	{
+		static uint32_t crow[4096][2];
+		unsigned nc = 0;
+		for (unsigned i = 0; i < 4096; i++) {
+			if (prof_callers[i].pc != 0) {
+				crow[nc][0] = i;
+				crow[nc][1] = prof_callers[i].n;
+				nc++;
+			}
+		}
+		for (unsigned a = 0; a < nc; a++) {            /* (few: a plain sort) */
+			for (unsigned b = a + 1; b < nc; b++) {
+				if (crow[b][1] > crow[a][1]) {
+					uint32_t t0 = crow[a][0], t1 = crow[a][1];
+					crow[a][0] = crow[b][0];
+					crow[a][1] = crow[b][1];
+					crow[b][0] = t0;
+					crow[b][1] = t1;
+				}
+			}
+		}
+		say("redwood-gl: glprof: %u samples in system calls, %u traced to a caller\n", prof_kernel, prof_kernel_unwound);
+		for (unsigned a = 0; a < nc && a < 40; a++) {
+			Dl_info info;
+			uintptr_t pc = prof_callers[crow[a][0]].pc;
+			const char *name = "?", *sym = "?";
+			uintptr_t base = 0, saddr = 0;
+
+			if (dladdr((const void *)pc, &info)) {
+				name = info.dli_fname && strrchr(info.dli_fname, '/') ? strrchr(info.dli_fname, '/') + 1 : "?";
+				base = (uintptr_t)info.dli_fbase;
+				sym = info.dli_sname ? info.dli_sname : "?";
+				saddr = (uintptr_t)info.dli_saddr;
+			}
+			say("redwood-gl: glprof call %u %s+%#lx %s+%#lx\n", crow[a][1], name, (unsigned long)(pc - base), sym,
+			    (unsigned long)(saddr ? pc - saddr : 0));
+		}
 	}
 	say("redwood-gl: glprof: done\n");
 	return NULL;
