@@ -1,0 +1,32 @@
+From ff0ab7da6c834cf520e4730bc18b2f13aeb9f643 Mon Sep 17 00:00:00 2001
+From: zaken9090 <zaken9090@users.noreply.github.com>
+Date: Sun, 22 Nov 2026 11:12:51 +0200
+Subject: [PATCH] lavender: no kmsg signatures, no zalloc zero check (speed)
+
+
+diff --git a/osfmk/ipc/ipc_kmsg.c b/osfmk/ipc/ipc_kmsg.c
+index b4d1276..19ca6bf 100644
+--- a/osfmk/ipc/ipc_kmsg.c
++++ b/osfmk/ipc/ipc_kmsg.c
+@@ -539,7 +539,7 @@ ikm_finalize_sig(
+ 	return *scratchp;
+ }
+ 
+-#elif defined(CRYPTO_SHA2) && !defined(__x86_64__)
++#elif defined(CRYPTO_SHA2) && !defined(__x86_64__) && 0   /* lavender: a SHA-256 of every Mach message, made and checked again, cost ~4% of backboardd on the A73 (no PAC): stubbed as on x86 */
+ 
+ typedef SHA256_CTX ikm_sig_scratch_t;
+ 
+diff --git a/osfmk/kern/zalloc_internal.h b/osfmk/kern/zalloc_internal.h
+index cdd5939..d0d379b 100644
+--- a/osfmk/kern/zalloc_internal.h
++++ b/osfmk/kern/zalloc_internal.h
+@@ -76,7 +76,7 @@
+  * Disable zalloc zero validation under kasan as it is
+  * double-duty with what kasan already does.
+  */
+-#if KASAN
++#if KASAN || 1   /* lavender: no check that each zone element is still zero when given out (elements are zeroed on free all the same) */
+ #define ZALLOC_ENABLE_ZERO_CHECK        0
+ #else
+ #define ZALLOC_ENABLE_ZERO_CHECK        1
