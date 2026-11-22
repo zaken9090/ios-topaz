@@ -186,6 +186,10 @@ def build(seed=None):
     product_props = d22ap_product()
     if product_props:
         product_props = [(k, cstr('sRGB') if k == 'artwork-display-gamut' else v) for k, v in product_props]
+        if '--xr' in sys.argv:
+            # lavender (sweetfb_scale2=2): UIKit picks the status bar and artwork by these; the XR's 1792 @2x
+            xr = {'artwork-device-subtype': u32(1792), 'artwork-scale-factor': u32(2)}
+            product_props = [(k, xr.get(k, v)) for k, v in product_props]
     product = [node('product', [ph()] + product_props)] if product_props else []
 
     return node('device-tree', [
