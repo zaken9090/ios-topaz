@@ -42,6 +42,14 @@
     util_blitter_set_texture_multisample(fd5_ctx->base.blitter, true);
  
     fd5_ctx->vsc_size_mem =
+@@ -92,5 +120,7 @@
+    fd5_ctx->border_color_uploader =
+       u_upload_create(pctx, 4096, 0, PIPE_USAGE_STREAM, 0);
+ 
++   if (debug_get_bool_option("FD_TC", false))
++      return fd_context_init_tc(pctx, flags);
+    return pctx;
+ }
 --- a/src/gallium/frontends/osmesa/osmesa.c
 +++ b/src/gallium/frontends/osmesa/osmesa.c
 @@ -1027,3 +1027,14 @@
