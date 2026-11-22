@@ -228,6 +228,7 @@ struct image {
 	GLuint mirror;                  /* a texture that is the surface's memory, which the GPU copies the frame into (blit_targets) */
 	uint32_t gen;                   /* lavender: the surface's generation this texture holds (surface_gen, mirror_refresh()) */
 	uint32_t ver;                   /* lavender: the surface's draw count this texture holds (surface_ver, live_sync()) */
+	unsigned kept;                  /* lavender: the frame (+1) for which the last frame was copied in (preserve_before()) */
 	bool wrapped;                   /* the surface is memory of somebody's with a surface made around it */
 	bool alpha_first;               /* its pixels are opacity, blue, green, red in memory: see my_attachImage() */
 	bool painted;                   /* something has been drawn into it (it is a target in fact, not only in name) */
@@ -588,6 +589,7 @@ static struct { GLint fb, scale; } program_fetch[4096];  /* programs that read t
 
 static void mirror_refresh(struct eagl *e, struct image *image);
 static bool live_sync(struct eagl *e, struct image *image);
+static void preserve_before(struct eagl *e);
 static unsigned live_syncs, live_reads_target, live_reads_shown, live_reads_other;
 #define SURFACE_GENS 4096
 static GLuint surface_writer[SURFACE_GENS];
@@ -692,6 +694,7 @@ order_before_draw(struct eagl *e)
 			glEnable(GL_SCISSOR_TEST);
 		}
 	}
+	preserve_before(e);
 	fetch_bind(e);
 
 	if (!order_on) {
@@ -1160,6 +1163,57 @@ live_sync(struct eagl *e, struct image *image)
 	return true;
 }
 
+/*
+ * lavender: CoreAnimation draws only what changed since the last frame, into a display surface
+ * it takes to hold the last frame; with two surfaces, the one drawn into held the frame before
+ * that, and what had not changed since the last frame came out two frames old: blurs read their
+ * own old picture again (the page dots and the dock darker, in halves), plates bitten in the
+ * damage's rectangles, flicker. So before the first clear or draw of a frame into a display
+ * surface's texture, the last frame is copied into it, by the GPU (glpreserve=0: not).
+ */
+static int preserve_on = 1;
+static GLuint preserve_from;
+static unsigned preserves;
+
+static void
+preserve_before(struct eagl *e)
+{
+	struct image *image, *from;
+	GLint read = 0, draw = 0;
+	GLboolean boxed;
+
+	if (!preserve_on || e->colour == 0 || (image = image_of(e, e->colour)) == NULL || !image->target || image->mirror == 0 ||
+	    image->kept == e->frames + 1) {
+		return;
+	}
+	image->kept = e->frames + 1;
+	if (preserve_from == 0 || preserve_from == image->texture || (from = image_of(e, preserve_from)) == NULL ||
+	    from->width != image->width || from->height != image->height) {
+		return;
+	}
+	boxed = glIsEnabled(GL_SCISSOR_TEST);
+	glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &read);
+	glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &draw);
+	if (e->reader == 0) {
+		glGenFramebuffers(1, &e->reader);
+	}
+	if (e->writer == 0) {
+		glGenFramebuffers(1, &e->writer);
+	}
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, e->reader);
+	glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, from->texture, 0);
+	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, e->writer);
+	glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, image->texture, 0);
+	glDisable(GL_SCISSOR_TEST);
+	glBlitFramebuffer(0, 0, image->width, image->height, 0, 0, image->width, image->height, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+	glBindFramebuffer(GL_READ_FRAMEBUFFER, (GLuint)read);
+	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, (GLuint)draw);
+	if (boxed) {
+		glEnable(GL_SCISSOR_TEST);
+	}
+	preserves++;
+}
+
 /* before a draw into it: it is now the surface's newest picture */
 static void
 live_drawn(struct image *image)
@@ -1349,6 +1403,7 @@ frame_end(struct eagl *e, bool finished)
 	before = now_us();
 	for (unsigned i = 0; i < e->image_count; i++) {
 		if (e->images[i].target && e->images[i].drawn && e->images[i].mirror != 0) {
+			preserve_from = e->images[i].texture;   /* (the next frame starts from this one: preserve_before()) */
 			target_to_surface(e, &e->images[i]);    /* (the GPU's copy: before what follows sends it out) */
 			in_place++;
 			glFlush();                              /* (also after a glFinish: the copy is new since) */
@@ -1449,6 +1504,8 @@ frame_end(struct eagl *e, bool finished)
 		    after - waited, e->attaching);
 		say("redwood-gl: frame %u flushes: %u CA, %u order, %u mirror, %u mip, %u fetch; %llu us flushing\n", e->frames,
 		    fl_app, fl_order, fl_mirror, fl_mip, fl_fetch, e->flushing);
+		say("redwood-gl: frame %u: %u last frames copied in\n", e->frames, preserves);
+		preserves = 0;
 		say("redwood-gl: frame %u live: %u syncs; reads of a surface drawn into through another texture: %u targets, %u shown, %u other\n",
 		    e->frames, live_syncs, live_reads_target, live_reads_shown, live_reads_other);
 	}
@@ -2315,6 +2372,7 @@ clear_now(struct eagl *e)
 	if (e->unclear == 0) {
 		return;
 	}
+	preserve_before(e);
 	boxed = glIsEnabled(GL_SCISSOR_TEST);
 	glGetIntegerv(GL_SCISSOR_BOX, box);
 	glGetFloatv(GL_COLOR_CLEAR_VALUE, colour);
@@ -4501,6 +4559,7 @@ install(void)
 		order_mesa_textures = strstr(arguments, "glorder=2") != NULL;
 		cubic_on = strstr(arguments, "glcubic=1") != NULL;
 		box_inner = strstr(arguments, "glbox=4") != NULL;
+		preserve_on = strstr(arguments, "glpreserve=0") == NULL;
 		if ((argument = strstr(arguments, "glno=")) != NULL) {
 			size_t n = strcspn(argument, " ");
 			no_vcm = memmem(argument, n, "vcm", 3) != NULL;
