@@ -1209,7 +1209,7 @@ live_sync(struct eagl *e, struct image *image)
  * damage's rectangles, flicker. So before the first clear or draw of a frame into a display
  * surface's texture, the last frame is copied into it, by the GPU (glpreserve=0: not).
  */
-static int preserve_on = 1;
+static int preserve_on = 0;   /* glpreserve=1: on (did not help the flicker, costs a blit a frame) */
 static GLuint preserve_from;
 static unsigned preserves;
 
@@ -4055,7 +4055,7 @@ static const char fragment_start[] =
     "  return g0.y * (g0.x * textureLod(s, h0, 0.) + g1.x * textureLod(s, vec2(h1.x, h0.y), 0.)) +\n"
     "         g1.y * (g0.x * textureLod(s, vec2(h0.x, h1.y), 0.) + g1.x * textureLod(s, h1, 0.));\n"
     "}\n";
-static int cubic_on = 0;   /* off by default: garbles widget text and the status bar battery for now (glcubic=1 to try) */
+static int cubic_on = 1;   /* glcubic=0: off */
 /*
  * What a fragment shader of the first version writes to (gl_FragData), and with the extension a
  * GPU's driver offers and CoreAnimation then uses (EXT_shader_framebuffer_fetch) reads what is
@@ -4195,6 +4195,14 @@ my_glShaderSource(void *context, GLuint shader, GLsizei count, const GLchar *con
 		/* a shader that uses coord_arg but does not declare it (one of CoreAnimation's: "coord_arg undeclared", not made) */
 		bool declare = strstr(text, "coord_arg") != NULL && strstr(text, "vec4 coord_arg") == NULL;
 		char *more = malloc(strlen(text) * 2 + 256);
+		/*
+		 * Only CoreAnimation's plain stretch of a backdrop (one texture, clamped coordinates, the
+		 * sample written as it is: "gl_FragData[0] = s0;") is read smoothly; Apple's own Metal
+		 * renderer does that step with a four-tap cubic (QuartzCore default.metallib,
+		 * upsample_frag). Every shader that clamps had garbled text and the battery.
+		 */
+		const char *first = strstr(text, "texture2D(");
+		bool stretch = first != NULL && strstr(first + 1, "texture2D(") == NULL && strstr(text, "gl_FragData[0] = s0;") != NULL;
 
 		if (more != NULL) {
 			char *to = more;
@@ -4203,7 +4211,7 @@ my_glShaderSource(void *context, GLuint shader, GLsizei count, const GLchar *con
 			for (const char *at = text; *at != 0;) {
 				int k = -1;
 
-				if (cubic_on && strncmp(at, "texture2D(texture", 17) == 0 && at[17] >= '0' && at[17] <= '3' &&
+				if (cubic_on && stretch && strncmp(at, "texture2D(texture", 17) == 0 && at[17] >= '0' && at[17] <= '3' &&
 				    strncmp(at + 18, ", tc", 4) == 0 && at[22] == at[17] && strncmp(at + 23, "_0)", 3) == 0) {
 					char clamped[64];
 
@@ -4595,9 +4603,9 @@ install(void)
 		zero_on = strstr(arguments, "glzero=0") == NULL;
 		order_on = strstr(arguments, "glorder=0") == NULL;
 		order_mesa_textures = strstr(arguments, "glorder=2") != NULL;
-		cubic_on = strstr(arguments, "glcubic=1") != NULL;
+		cubic_on = strstr(arguments, "glcubic=0") == NULL;
 		box_inner = strstr(arguments, "glbox=4") != NULL;
-		preserve_on = strstr(arguments, "glpreserve=0") == NULL;
+		preserve_on = strstr(arguments, "glpreserve=1") != NULL;
 		if ((argument = strstr(arguments, "glno=")) != NULL) {
 			size_t n = strcspn(argument, " ");
 			no_vcm = memmem(argument, n, "vcm", 3) != NULL;
