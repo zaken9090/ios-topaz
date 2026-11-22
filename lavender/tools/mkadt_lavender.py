@@ -99,7 +99,8 @@ def build(seed=None):
         ('boot-manifest-hash', BOOT_MANIFEST_HASH),
         ('crypto-hash-method', cstr('sha2-384')),
         # 1080x2340 @3x = 360x780 points
-        ('display-scale', u32(3)),
+        # lavender: --scale2 (xnu 1028 sweetfb_scale2=1): 375x812 points at 2x, 750x1624 pixels
+        ('display-scale', u32(2 if '--scale2' in sys.argv else 3)),
         ('unique-chip-id', struct.pack('<Q', SWEET_ECID)),
         ('chip-id', u32(0x8015)),
         ('certificate-production-status', u32(0)),
@@ -157,8 +158,8 @@ def build(seed=None):
             ph(),
             ('device_type', cstr('display-subsystem')),
             ('compatible', cstr('sweet,display')),
-            ('canvas-width', u32(1125)),
-            ('canvas-height', u32(2436)),
+            ('canvas-width', u32(750 if '--scale2' in sys.argv else 1125)),
+            ('canvas-height', u32(1624 if '--scale2' in sys.argv else 2436)),
         ])])
 
     fbcon = node('sweet-fbcon', [

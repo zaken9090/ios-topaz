@@ -1,0 +1,177 @@
+From 1f038da6392b55554305904d3adc47418438963a Mon Sep 17 00:00:00 2001
+From: zaken9090 <zaken9090@users.noreply.github.com>
+Date: Sun, 22 Nov 2026 02:51:26 +0200
+Subject: [PATCH] lavender: sweetfb_scale2=1 - iOS draws 750x1624 (375x812 pt
+ @2x), VIG0's QSEED3 scales it bilinearly to the 1080x2340 panel; touches over
+ the whole panel
+
+---
+ iokit/Kernel/arm/SweetFramebuffer.cpp | 76 +++++++++++++++++++++++++--
+ iokit/Kernel/arm/hid/SweetHID.cpp     |  6 ++-
+ 2 files changed, 77 insertions(+), 5 deletions(-)
+
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+index ab7b0e0..168fd7b 100644
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -189,6 +189,8 @@ public:
+ 	uint32_t      fPanelUS;       /* a panel frame, measured */
+ 	uint32_t      vsyncNext(void);
+ 	uint64_t      fScanPhys;      /* what VIG0 currently fetches */
++	bool          fScaled;        /* lavender: sweetfb_scale2=1 - iOS draws 750x1624 (@2x), VIG0's QSEED3 scales it to the panel */
++	bool          fScaleOn;       /* ... and the scaler is set up for that now */
+ 	uint32_t      fScanStride;
+ 	uint32_t      fBootSrc, fBootStride;
+ 	bool          directPresent(const uint8_t *rec);
+@@ -208,6 +210,7 @@ public:
+ 	void          showPending(const uint8_t *rec, SweetSurface **held);
+ 	bool          directEligible(const uint8_t *rec, SweetSurface **held);
+ 	void          scanFrom(uint64_t pa, uint32_t stride);
++	void          scaleSet(bool on);
+ 	uint32_t      fFlushTicks;    /* vsync ticks between panel copies */
+ 	bool          fPowerOff;      /* RequestPowerChange(0) */
+ 	uint32_t      fFadeStep;      /* fade-out steps done while off */
+@@ -335,6 +338,20 @@ AppleCLCD::start(IOService *provider)
+ 		fLogicalW = SWEET_FB_LOGICAL_W;
+ 		fLogicalH = SWEET_FB_LOGICAL_H;
+ 	}
++	{
++		/*
++		 * lavender: boot-arg sweetfb_scale2=1 - the iPhone X's 375x812 points at 2x (750x1624, the
++		 * ADT's /chosen/display-scale 2): 2.25 times fewer pixels for CoreAnimation to draw, and VIG0's
++		 * QSEED3 scaler stretches them over the whole 1080x2340 panel (no columns cut off either).
++		 */
++		int scale2 = 0;
++		PE_parse_boot_argn("sweetfb_scale2", &scale2, sizeof(scale2));
++		if (scale2 != 0 && !native) {
++			fScaled = true;
++			fLogicalW = 750;
++			fLogicalH = 1624;
++		}
++	}
+ 	/* x rounded down to 4 pixels: the panel window must start 16-byte aligned (MDP fetch) */
+ 	fOffX = ((int32_t)(fLogicalW - fWidth) / 2) & ~3;
+ 	fOffY = (int32_t)(fLogicalH - fHeight) / 2;
+@@ -350,6 +367,9 @@ AppleCLCD::start(IOService *provider)
+ 			fOffY = (int32_t)offy;
+ 		}
+ 	}
++	if (fScaled) {
++		fOffX = fOffY = 0;
++	}
+ 	fLock = IOLockAlloc();
+ 	fClients = OSArray::withCapacity(4);
+ 	fSurface = sweet_surface_create_physical(fPhys, fWidth, fHeight, fRowBytes, SWEET_FB_FORMAT_BGRA);
+@@ -1128,6 +1148,50 @@ AppleCLCD::showPending(const uint8_t *rec, SweetSurface **heldIn)
+ 	}
+ }
+ 
++/*
++ * lavender (sweetfb_scale2): VIG0 fetches the 750x1624 surface and its QSEED3 (VIG0 + 0xa00,
++ * mdss_mdp_qseed3_setup in Xiaomi's lavender kernel: bilinear, no LUT) makes 1080x2340 of it;
++ * off: fetch and show 1:1 again (the copy path's panel-sized buffers).
++ */
++void
++AppleCLCD::scaleSet(bool on)
++{
++	if (fVig0 == NULL || on == fScaleOn) {
++		return;
++	}
++	volatile uint32_t *sc = fVig0 + 0xa00 / 4;
++	uint32_t sw = on ? fLogicalW : fWidth, sh = on ? fLogicalH : fHeight;
++	fVig0[0x00 / 4] = (sh << 16) | sw;              /* SSPP_SRC_SIZE */
++	fVig0[0x04 / 4] = (sh << 16) | sw;              /* SSPP_SRC_IMG_SIZE */
++	fVig0[0x08 / 4] = 0;                            /* SSPP_SRC_XY */
++	for (uint32_t off = 0; off <= 32; off += 16) {  /* SW pixel extension, planes 0, 1/2, 3 */
++		fVig0[(0x100 + off) / 4] = 0;
++		fVig0[(0x104 + off) / 4] = 0;
++		fVig0[(0x108 + off) / 4] = (sh << 16) | sw;
++	}
++	if (on) {
++		uint32_t stepx = (uint32_t)(((uint64_t)sw << 21) / fWidth), stepy = (uint32_t)(((uint64_t)sh << 21) / fHeight);
++		sc[0x0c / 4] = 0;                       /* PHASE_INIT */
++		sc[0x10 / 4] = stepx;                   /* PHASE_STEP_Y_H */
++		sc[0x14 / 4] = stepy;                   /* PHASE_STEP_Y_V */
++		sc[0x18 / 4] = stepx;                   /* PHASE_STEP_UV_H */
++		sc[0x1c / 4] = stepy;                   /* PHASE_STEP_UV_V */
++		sc[0x20 / 4] = 0x03040304;              /* PRELOAD: 4 across, 3 down */
++		sc[0x40 / 4] = (sh << 16) | sw;         /* SRC_SIZE_Y_RGB_A */
++		sc[0x44 / 4] = (sh << 16) | sw;         /* SRC_SIZE_UV */
++		sc[0x48 / 4] = (fHeight << 16) | fWidth;        /* DST_SIZE */
++		/* OP_MODE: enable, 8-bit, Y/RGB and UV bilinear, blend */
++		sc[0x04 / 4] = 1u | (1u << 14) | (3u << 16) | (3u << 24) | (1u << 31);
++	} else {
++		sc[0x04 / 4] = 1u << 14;
++	}
++	__asm__ volatile("dsb sy" ::: "memory");
++	if (!fScaleOn && on) {
++		IOLog("SWEET FB: VIG0 QSEED3 (version %#x) scales %ux%u to %ux%u\n", sc[0], sw, sh, fWidth, fHeight);
++	}
++	fScaleOn = on;
++}
++
+ void
+ AppleCLCD::scanFrom(uint64_t pa, uint32_t stride)
+ {
+@@ -1484,16 +1548,17 @@ AppleCLCD::directPresent(const uint8_t *rec)
+ 	}
+ 	bool ok = false;
+ 	(void)topaz_surface_drawn(s, 100);
++	bool scaled = fScaled && s->width == fLogicalW && s->height == fLogicalH;
+ 	if (s->scanoutPhys != 0 && s->bytesPerElement == 4 &&
+-	    s->width >= fWidth && s->height >= fHeight) {
++	    (scaled ? s->gpuPool : (s->width >= fWidth && s->height >= fHeight))) {
+ 		/* full-screen surface: panel window at the logical offset */
+-		uint32_t ox = (s->width - fWidth) / 2, oy = (s->height - fHeight) / 2;
+-		if (s->width == fLogicalW && s->height == fLogicalH) {
++		uint32_t ox = scaled ? 0 : (s->width - fWidth) / 2, oy = scaled ? 0 : (s->height - fHeight) / 2;
++		if (!scaled && s->width == fLogicalW && s->height == fLogicalH) {
+ 			ox = (uint32_t)fOffX;
+ 			oy = (uint32_t)fOffY;
+ 		}
+ 		uint64_t pa = s->scanoutPhys + s->offset + (uint64_t)oy * s->bytesPerRow + (uint64_t)ox * 4;
+-		if ((pa & 0xf) == 0 && pa + (uint64_t)fHeight * s->bytesPerRow < (1ull << 32)) {
++		if ((pa & 0xf) == 0 && pa + (uint64_t)(scaled ? fLogicalH : fHeight) * s->bytesPerRow < (1ull << 32)) {
+ 			uintptr_t va = s->kernelAddress();
+ 			if (va != 0) {
+ 				/*
+@@ -1511,8 +1576,10 @@ AppleCLCD::directPresent(const uint8_t *rec)
+ 					if (wc != NULL) {
+ 						sweet_osd_draw(wc, s->bytesPerRow, 40, 150);
+ 					}
++					scaleSet(scaled);
+ 					scanFrom(pa, s->bytesPerRow);
+ 				} else if (fFlip[0] != NULL) {
++					scaleSet(false);
+ 					flipFrom((const uint8_t *)(va + s->offset + (uint64_t)oy * s->bytesPerRow + (uint64_t)ox * 4),
+ 					    s->bytesPerRow);
+ 				} else {
+@@ -1573,6 +1640,7 @@ AppleCLCD::present(const uint8_t *rec)
+ 	 * framebuffer showed every multi-layer frame (dims, apps) drawn top-down.
+ 	 */
+ 	uint8_t *dst = fFlip[0] != NULL ? backBuffer() : (uint8_t *)fPixels;
++	scaleSet(false);                                /* (the copy path composes panel-sized pictures) */
+ 	if (fFlip[0] == NULL && fVig0 != NULL && fScanPhys != fBootSrc) {
+ 		scanFrom(fBootSrc, fBootStride);
+ 	}
+diff --git a/iokit/Kernel/arm/hid/SweetHID.cpp b/iokit/Kernel/arm/hid/SweetHID.cpp
+index 50121db..f06a8c5 100644
+--- a/iokit/Kernel/arm/hid/SweetHID.cpp
++++ b/iokit/Kernel/arm/hid/SweetHID.cpp
+@@ -433,8 +433,12 @@ SweetHIDTouch::start(IOService *provider)
+ 	if (!fLock || !IOHIDEventService::start(provider)) {
+ 		return false;
+ 	}
+-	int native = 0;
++	int native = 0, scale2 = 0;
+ 	PE_parse_boot_argn("sweetfb_native", &native, sizeof(native));
++	/* lavender: sweetfb_scale2=1 - the presented picture covers the whole panel (as SweetFramebuffer.cpp) */
++	if (PE_parse_boot_argn("sweetfb_scale2", &scale2, sizeof(scale2)) && scale2 != 0) {
++		native = 1;
++	}
+ 	fLogicalW = native ? 1080 : 1125;
+ 	fLogicalH = native ? SWEET_PANEL_H : 2436;
+ 	fOffX = ((fLogicalW - 1080) / 2) & ~3;           /* as SweetFramebuffer.cpp */
+-- 
+2.56.0.windows.4
+
