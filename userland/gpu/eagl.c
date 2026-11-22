@@ -4430,6 +4430,7 @@ static const char fragment_start[] =
     "         g1.y * (g0.x * textureLod(s, vec2(h0.x, h1.y), 0.) + g1.x * textureLod(s, h1, 0.));\n"
     "}\n";
 static int cubic_on = 1;
+static int tex_barrier_on = 1;  /* boot-arg gltexbar=0: framebuffer fetch by glFlush, as before */
 static int no_noise;            /* boot-arg glnonoise=1: CoreAnimation's blur noise (noise_scale) left out */   /* glcubic=0: off */
 /*
  * What a fragment shader of the first version writes to (gl_FragData), and with the extension a
@@ -4499,7 +4500,24 @@ fetch_bind_program(struct eagl *e, GLuint program)
 	if (program == 0 || program >= 4096 || program_fetch[program].fb == 0 || e->colour == 0) {
 		return;
 	}
-	glFlush();                              /* (the draws so far written out before they are read) */
+	/*
+	 * (the draws so far written out before they are read) - lavender: by a texture barrier where
+	 * the library has one (OSMesaTextureBarrier: Mesa's freedreno, drawing straight to memory,
+	 * flushes its caches inside the batch instead of ending it); glFlush otherwise or with
+	 * gltexbar=0.
+	 */
+	static void (*barrier)(void);
+	static int looked;
+	if (!looked) {
+		looked = 1;
+		barrier = tex_barrier_on ? (void (*)(void))dlsym(RTLD_DEFAULT, "OSMesaTextureBarrier") : NULL;
+		say("redwood-gl: framebuffer fetch through %s\n", barrier ? "a texture barrier" : "glFlush");
+	}
+	if (barrier != NULL) {
+		barrier();
+	} else {
+		glFlush();
+	}
 	fl_fetch++;
 	glActiveTexture(GL_TEXTURE0 + 15);
 	glBindTexture(GL_TEXTURE_2D, e->colour);
@@ -4987,6 +5005,7 @@ install(void)
 		order_mesa_textures = strstr(arguments, "glorder=1") == NULL;   /* lavender: 2 by default (fewer flushes: each makes and frees a whole Mesa batch); glorder=1: as before */
 		cubic_on = strstr(arguments, "glcubic=0") == NULL;
 		no_noise = strstr(arguments, "glnonoise=1") != NULL;
+		tex_barrier_on = strstr(arguments, "gltexbar=0") == NULL;
 		box_inner = strstr(arguments, "glbox=4") != NULL;
 		if ((argument = strstr(arguments, "glprof=")) != NULL) {
 			prof_secs = (uint32_t)strtoul(argument + 7, (char **)&argument, 10);

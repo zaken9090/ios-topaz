@@ -1,0 +1,60 @@
+--- a/src/gallium/drivers/freedreno/a5xx/fd5_context.c
++++ b/src/gallium/drivers/freedreno/a5xx/fd5_context.c
+@@ -20,6 +20,32 @@
+ #include "fd5_rasterizer.h"
+ #include "fd5_texture.h"
+ #include "fd5_zsa.h"
++
++/*
++ * lavender: drawing straight to memory (FD_MESA_DEBUG=sysmem), what was drawn is in memory once
++ * the colour cache is flushed and the texture cache invalidated - as the batch's own end does
++ * (fd5_emit_sysmem_fini) - so a texture barrier (a draw that reads the framebuffer's texture:
++ * CoreAnimation's framebuffer fetch, emulated) need not end the batch: fd_texture_barrier()
++ * flushed the whole context, a submission each time.
++ */
++static void
++fd5_texture_barrier(struct pipe_context *pctx, unsigned flags) in_dt
++{
++   struct fd_context *ctx = fd_context(pctx);
++
++   if (FD_DBG(SYSMEM)) {
++      struct fd_batch *batch = fd_context_batch(ctx);
++
++      if (!batch->nondraw && batch->draw) {
++         fd5_event_write(batch, batch->draw, PC_CCU_FLUSH_COLOR_TS, true);
++         fd5_cache_flush(batch, batch->draw);
++         fd_batch_reference(&batch, NULL);
++         return;
++      }
++      fd_batch_reference(&batch, NULL);
++   }
++   fd_context_flush(pctx, NULL, 0);
++}
+ 
+ static void
+ fd5_context_destroy(struct pipe_context *pctx) in_dt
+@@ -77,6 +103,8 @@
+    if (!pctx)
+       return NULL;
+ 
++   pctx->texture_barrier = fd5_texture_barrier;
++
+    util_blitter_set_texture_multisample(fd5_ctx->base.blitter, true);
+ 
+    fd5_ctx->vsc_size_mem =
+--- a/src/gallium/frontends/osmesa/osmesa.c
++++ b/src/gallium/frontends/osmesa/osmesa.c
+@@ -1027,3 +1027,13 @@
+       debug_warning("Calling OSMesaPostprocess() after OSMesaMakeCurrent()\n");
+    }
+ }
++
++
++void GLAPIENTRY _mesa_TextureBarrierNV(void);
++
++/* lavender: glTextureBarrierNV for the ES context CoreAnimation draws with (libtopaz-gl's emulated framebuffer fetch) */
++GLAPI void GLAPIENTRY
++OSMesaTextureBarrier(void)
++{
++   _mesa_TextureBarrierNV();
++}
