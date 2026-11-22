@@ -59,6 +59,7 @@ jobs:
             -framework CoreFoundation -framework IOKit -lobjc \
             -o out/libtopaz-inject.dylib gpu/topaz_inject.c
           cp $M/libOSMesa.8.dylib out/
+          cp $M/libOSMesa.8.full.dylib out/ || true
           for f in out/*.dylib; do codesign -s - -f "$f"; done
           ls -la out
           otool -L out/libtopaz-gl.dylib

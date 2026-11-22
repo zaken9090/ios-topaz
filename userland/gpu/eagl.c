@@ -69,6 +69,9 @@
 #include <string.h>
 #include <sys/sysctl.h>
 #include <unistd.h>
+#include <dlfcn.h>
+#include <mach/mach.h>
+#include <pthread.h>
 
 #include "redwood_gl.h"
 
@@ -1455,10 +1458,140 @@ frame_begin(struct eagl *e)
  * glFlush, glFinish: what was drawn must be where the display takes it from. `finished`: the
  * library has been waited for already.
  */
+/*
+ * lavender: boot-arg glprof=SECS,DELAY - DELAY seconds after the first frame, a thread of ours
+ * stops the thread that draws every half millisecond for SECS seconds and notes where it is
+ * (thread_get_state); then: the share of each library, and every place in libOSMesa with its
+ * count ("glprof M OFFSET:COUNT ..."), for symbols from the unstripped library off the phone.
+ */
+#define PROF_SLOTS 32768
+static struct { uintptr_t pc; uint32_t n; } prof_tab[PROF_SLOTS];
+static uint32_t prof_total, prof_lost, prof_secs, prof_delay;
+static mach_port_t prof_target;
+static int prof_started;
+
+static void
+prof_add(uintptr_t pc)
+{
+	uint32_t h = (uint32_t)((pc >> 2) * 2654435761u) & (PROF_SLOTS - 1);
+
+	for (uint32_t i = 0; i < 128; i++) {
+		uint32_t k = (h + i) & (PROF_SLOTS - 1);
+		if (prof_tab[k].pc == pc) {
+			prof_tab[k].n++;
+			return;
+		}
+		if (prof_tab[k].pc == 0) {
+			prof_tab[k].pc = pc;
+			prof_tab[k].n = 1;
+			return;
+		}
+	}
+	prof_lost++;
+}
+
+static int
+prof_by_count(const void *a, const void *b)
+{
+	uint32_t x = ((const uint32_t *)a)[2], y = ((const uint32_t *)b)[2];
+	return x < y ? 1 : x > y ? -1 : 0;
+}
+
+static void *
+prof_main(void *arg)
+{
+	(void)arg;
+	sleep(prof_delay);
+	say("redwood-gl: glprof: sampling the drawing thread for %u s\n", prof_secs);
+	uint64_t end = now_us() + (uint64_t)prof_secs * 1000000u;
+	while (now_us() < end) {
+		arm_thread_state64_t st;
+		mach_msg_type_number_t cnt = ARM_THREAD_STATE64_COUNT;
+
+		if (thread_suspend(prof_target) == KERN_SUCCESS) {
+			if (thread_get_state(prof_target, ARM_THREAD_STATE64, (thread_state_t)&st, &cnt) == KERN_SUCCESS) {
+				prof_add((uintptr_t)arm_thread_state64_get_pc(st));
+				prof_total++;
+			}
+			thread_resume(prof_target);
+		}
+		usleep(500);
+	}
+	/* by library */
+	struct { const char *name; uintptr_t base; uint32_t n; } libs[48];
+	unsigned nlibs = 0;
+	uintptr_t mesa_base = 0;
+	for (unsigned i = 0; i < PROF_SLOTS; i++) {
+		Dl_info info;
+		const char *name = "?";
+		uintptr_t base = 0;
+
+		if (prof_tab[i].pc == 0) {
+			continue;
+		}
+		if (dladdr((const void *)prof_tab[i].pc, &info) && info.dli_fname != NULL) {
+			name = strrchr(info.dli_fname, '/') ? strrchr(info.dli_fname, '/') + 1 : info.dli_fname;
+			base = (uintptr_t)info.dli_fbase;
+		}
+		unsigned k;
+		for (k = 0; k < nlibs && libs[k].base != base; k++) {
+		}
+		if (k == nlibs && nlibs < 48) {
+			libs[nlibs].name = name;
+			libs[nlibs].base = base;
+			libs[nlibs].n = 0;
+			nlibs++;
+		}
+		if (k < nlibs) {
+			libs[k].n += prof_tab[i].n;
+		}
+		if (strstr(name, "OSMesa") != NULL) {
+			mesa_base = base;
+		}
+	}
+	say("redwood-gl: glprof: %u samples (%u not kept), libOSMesa at %#lx\n", prof_total, prof_lost, (unsigned long)mesa_base);
+	for (unsigned k = 0; k < nlibs; k++) {
+		if (libs[k].n * 200 >= prof_total) {
+			say("redwood-gl: glprof lib %s %u (%u.%u%%)\n", libs[k].name, libs[k].n, libs[k].n * 100 / (prof_total ? prof_total : 1),
+			    libs[k].n * 1000 / (prof_total ? prof_total : 1) % 10);
+		}
+	}
+	/* every place in Mesa (offset from its base), most first, twenty to a line */
+	static uint32_t rows[PROF_SLOTS][3];
+	unsigned nrows = 0;
+	for (unsigned i = 0; i < PROF_SLOTS; i++) {
+		if (prof_tab[i].pc != 0 && mesa_base != 0 && prof_tab[i].pc >= mesa_base && prof_tab[i].pc - mesa_base < 0x4000000) {
+			rows[nrows][0] = (uint32_t)(prof_tab[i].pc - mesa_base);
+			rows[nrows][1] = 0;
+			rows[nrows][2] = prof_tab[i].n;
+			nrows++;
+		}
+	}
+	qsort(rows, nrows, sizeof(rows[0]), prof_by_count);
+	for (unsigned i = 0; i < nrows; i += 16) {
+		char line[400];
+		int at = snprintf(line, sizeof(line), "glprof M");
+		for (unsigned j = i; j < nrows && j < i + 16; j++) {
+			at += snprintf(line + at, sizeof(line) - (size_t)at, " %x:%u", rows[j][0], rows[j][2]);
+		}
+		say("%s\n", line);
+	}
+	say("redwood-gl: glprof: done\n");
+	return NULL;
+}
+
 static void frame_functions(struct eagl *e);
 static void
 frame_end(struct eagl *e, bool finished)
 {
+	if (prof_secs != 0 && !prof_started) {
+		pthread_t thread;
+
+		prof_started = 1;
+		prof_target = mach_thread_self();
+		pthread_create(&thread, NULL, prof_main, NULL);
+		pthread_detach(thread);
+	}
 	static unsigned unfollowed;
 	uint64_t before, waited, after;
 	unsigned copied = 0, in_place = 0;
@@ -4662,6 +4795,10 @@ install(void)
 		order_mesa_textures = strstr(arguments, "glorder=2") != NULL;
 		cubic_on = strstr(arguments, "glcubic=0") == NULL;
 		box_inner = strstr(arguments, "glbox=4") != NULL;
+		if ((argument = strstr(arguments, "glprof=")) != NULL) {
+			prof_secs = (uint32_t)strtoul(argument + 7, (char **)&argument, 10);
+			prof_delay = *argument == ',' ? (uint32_t)strtoul(argument + 1, NULL, 10) : 60;
+		}
 		preserve_on = strstr(arguments, "glpreserve=1") != NULL;
 		if ((argument = strstr(arguments, "glno=")) != NULL) {
 			size_t n = strcspn(argument, " ");

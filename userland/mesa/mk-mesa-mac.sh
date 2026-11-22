@@ -58,6 +58,7 @@ BUILD=build-${DRIVERS//,/-}
 ninja -C $BUILD > ninja.log
 mkdir -p out
 $(xcrun -f strip) -x -o out/libOSMesa.8.dylib $BUILD/src/gallium/targets/osmesa/libOSMesa.8.dylib
+cp $BUILD/src/gallium/targets/osmesa/libOSMesa.8.dylib out/libOSMesa.8.full.dylib   # lavender: symbols for glprof offsets (not for the phone)
 install_name_tool -id /topaz/lib/libOSMesa.8.dylib out/libOSMesa.8.dylib
 nm -gU out/libOSMesa.8.dylib | awk '$3 ~ /^_gl/ { print substr($3, 2) }' > out/exported-gl.txt
 cp mesa-$VERSION/src/mapi/glapi/registry/gl.xml out/gl.xml
