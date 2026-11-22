@@ -242,7 +242,12 @@ def main():
                 for c in cmds:
                     if c.startswith('@put '):
                         local, remote = c[5:].split('\t', 1)
-                        data = open(local, 'rb').read()
+                        try:
+                            data = open(local, 'rb').read()
+                        except OSError as err:
+                            # (a missing file - a failed CI run's - once killed this thread: no command reached the phone)
+                            print('usblog: put skipped, cannot read %s: %s' % (local, err), file=sys.stderr)
+                            continue
                         hdr = ('lv:put %d %s' % (len(data), remote)).encode()
                         w = wt.ULONG(0)
                         okw = winusb.WinUsb_WritePipe(hu, 0x01, hdr, len(hdr), ctypes.byref(w), None)
