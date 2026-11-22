@@ -2063,7 +2063,7 @@ static const char box_inner_fragment[] =
     "  highp vec2 middle = texcoord / vec2(textureSize(texture0, 0));\n"
     "  highp vec4 sum = textureLod(texture0, middle + places[0], 0.) + textureLod(texture0, middle - places[0], 0.);\n"
     "  sum += textureLod(texture0, middle + places[0] * vec2(1., -1.), 0.) + textureLod(texture0, middle + places[0] * vec2(-1., 1.), 0.);\n"
-    "  result = color * sum * .25;\n"
+    "  result = sum * .25;\n"
     "}\n";
 static const char box_fragment[] =
     "#version 300 es\n"
@@ -2079,7 +2079,13 @@ static const char box_fragment[] =
     "    sum += textureLod(texture0, middle + places[i], 0.) + textureLod(texture0, middle - places[i], 0.);\n"
     "    sum += textureLod(texture0, middle + places[i] * vec2(1., -1.), 0.) + textureLod(texture0, middle + places[i] * vec2(-1., 1.), 0.);\n"
     "  }\n"
-    "  result = color * sum * .0625;\n"
+    /*
+     * lavender: no vertex colour, as Apple's own downsample_8_frag (QuartzCore default.metallib).
+     * CA leaves the colour array off for ds8; enabled here (plain draw setup) it read whatever the
+     * array last held: (0,0,0,1) on some quads made them opaque black in the blur's cache, and the
+     * search pill and dock read that: dark, in halves, flickering (2026-11-22).
+     */
+    "  result = sum * .0625;\n"
     "}\n";
 
 static void *ca_context;                /* CoreAnimation's GLContext */
