@@ -139,6 +139,7 @@ static int latency_lines;               /* boot-arg touch_lat=1: when every fram
 static uint64_t slow_calls_us;          /* boot-arg glslow=US: a line for every call that takes longer (eagl_leave()) */
 static uint64_t call_began_us;          /* (when the call in progress began) */
 static uint64_t now_us(void);
+static uint64_t dt_pre, dt_order, dt_begin, dt_mesa, dt_post, dt_draws;   /* (my_glDrawElements, summary()) */
 static void eagl_trace(const char *format, ...) __attribute__((format(printf, 1, 2)));
 static void eagl_trace_floats(const float *values, int count);
 static void eagl_enter(struct eagl *e, unsigned offset);
@@ -529,6 +530,13 @@ summary(struct eagl *e)
 		    e->frames_on_p, e->frames_on_e, eagl_slot_name(top[0] * 8), slot_us[top[0]], eagl_slot_name(top[1] * 8),
 		    slot_us[top[1]], eagl_slot_name(top[2] * 8), slot_us[top[2]], eagl_slot_name(top[3] * 8), slot_us[top[3]],
 		    eagl_slot_name(top[4] * 8), slot_us[top[4]]);
+	}
+	if (dt_draws != 0) {
+		say("redwood-gl: draw time (us per glDrawElements, %llu draws): ours before %llu.%llu, ordering %llu.%llu, setup %llu.%llu, "
+		    "Mesa %llu.%llu, after %llu.%llu\n", dt_draws, dt_pre / dt_draws, dt_pre * 10 / dt_draws % 10,
+		    dt_order / dt_draws, dt_order * 10 / dt_draws % 10, dt_begin / dt_draws, dt_begin * 10 / dt_draws % 10,
+		    dt_mesa / dt_draws, dt_mesa * 10 / dt_draws % 10, dt_post / dt_draws, dt_post * 10 / dt_draws % 10);
+		dt_draws = dt_pre = dt_order = dt_begin = dt_mesa = dt_post = 0;
 	}
 	for (unsigned i = 0; i < sizeof(formats) / sizeof(formats[0]) && formats[i].count; i++) {
 		say("redwood-gl:   textures: %s %#x/%#x/%#x: %u times, up to %u x %u\n", formats[i].how, formats[i].internal,
@@ -3566,12 +3574,17 @@ solid_draw(struct eagl *e, GLenum mode, GLsizei count, GLenum type, const void *
 	return 0;
 }
 
+/* lavender: where a glDrawElements' time goes (summary(): "draw time" line), microseconds summed */
+static uint64_t dt_pre, dt_order, dt_begin, dt_mesa, dt_post;
+static uint64_t dt_draws;
+
 static void
 my_glDrawElements(void *context, GLenum mode, GLsizei count, GLenum type, const void *indices)
 {
 	struct eagl *e = context;
 	GLint enabled[4] = { 1, 1, 1, 1 };
 	bool plain;
+	uint64_t t0 = now_us(), t1, t2, t3 = 0, t4 = 0;
 
 	EAGL_ENTER(e, 0x220);
 	drawing(e);
@@ -3585,18 +3598,24 @@ my_glDrawElements(void *context, GLenum mode, GLsizei count, GLenum type, const 
 	if (trace_placing) {
 		trace_placed_draw(e, mode, type, indices, 0, count);
 	}
+	t1 = now_us();
 	order_before_draw(e);
+	t2 = now_us();
 	int solid = solid_draw(e, mode, count, type, indices);
 	if (solid != 0) {
 		if (eagl_tracing) {
 			eagl_trace("    (glsolid: %s)\n", solid == 1 ? "skipped, changes nothing" : "drawn as a clear");
 		}
 	} else if (group_draw_begin(e, enabled)) {
+		t3 = now_us();
 		glDrawElements(mode, count, type, indices);
+		t4 = now_us();
 		group_draw_end(e, enabled);
 	} else {
 		plain = plain_draw_begin(e, enabled);
+		t3 = now_us();
 		glDrawElements(mode, count, type, indices);
+		t4 = now_us();
 		if (plain) {
 			plain_draw_end(e, enabled);
 		}
@@ -3605,6 +3624,20 @@ my_glDrawElements(void *context, GLenum mode, GLsizei count, GLenum type, const 
 		trace_placed_look(e);
 	}
 	dump_draw(e);
+	{
+		uint64_t t5 = now_us();
+
+		dt_draws++;
+		dt_pre += t1 - t0;
+		dt_order += t2 - t1;
+		if (t3 != 0) {
+			dt_begin += t3 - t2;
+			dt_mesa += t4 - t3;
+			dt_post += t5 - t4;
+		} else {
+			dt_begin += t5 - t2;
+		}
+	}
 	EAGL_LEAVE(e, 0x220);
 	if (eagl_tracing) {
 		trace_pixels(e);
