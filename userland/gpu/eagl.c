@@ -582,6 +582,8 @@ order_forget(void)
 }
 
 static void fetch_bind(struct eagl *e);
+static void fetch_bind_program(struct eagl *e, GLuint program);
+static struct { GLint fb, scale; } program_fetch[4096];  /* programs that read the framebuffer (emulated fetch): uniforms, +1 (0: none) */
 
 static void mirror_refresh(struct eagl *e, struct image *image);
 
@@ -2217,6 +2219,38 @@ plain_program(const char *fragment, const char *what)
 	glAttachShader(program, shader);
 	shader = glCreateShader(GL_FRAGMENT_SHADER);
 	text = fragment;
+	/*
+	 * lavender: our programs that read what is there (the colour matrix over what is behind, a
+	 * group's vibrant layer) were written for EXT_shader_framebuffer_fetch, which freedreno lacks
+	 * on the Adreno 5xx: they were NOT MADE and vibrant layers (the page dots, the search pill,
+	 * widgets' plates) went undrawn or flickered. Emulated as CoreAnimation's own shaders are
+	 * (fragment_fetch_emulated): "result" starts as the framebuffer's texture at the fragment,
+	 * which fetch_bind_program() binds after a flush.
+	 */
+	static const char ext_line[] = "#extension GL_EXT_shader_framebuffer_fetch : require\n";
+	static const char io_line[] = "layout(location = 0) inout highp vec4 result;\n";
+	static const char main_line[] = "void main() {\n";
+	char *emulated = NULL;
+	const char *ext = strstr(fragment, ext_line), *io = strstr(fragment, io_line), *body = strstr(fragment, main_line);
+
+	if (fetch_emulated && ext != NULL && io != NULL && body != NULL && ext < io && io < body &&
+	    (emulated = malloc(strlen(fragment) + 512)) != NULL) {
+		const char *ext_end = ext + sizeof(ext_line) - 1, *io_end = io + sizeof(io_line) - 1;
+		const char *body_end = body + sizeof(main_line) - 1;
+		size_t at = 0;
+
+		memcpy(emulated + at, fragment, (size_t)(ext - fragment));
+		at += (size_t)(ext - fragment);
+		memcpy(emulated + at, ext_end, (size_t)(io - ext_end));
+		at += (size_t)(io - ext_end);
+		at += (size_t)sprintf(emulated + at, "layout(location = 0) out highp vec4 result;\n"
+		    "uniform highp sampler2D redwood_fb;\nuniform highp vec2 redwood_fb_scale;\n");
+		memcpy(emulated + at, io_end, (size_t)(body_end - io_end));
+		at += (size_t)(body_end - io_end);
+		at += (size_t)sprintf(emulated + at, "  result = texture(redwood_fb, gl_FragCoord.xy * redwood_fb_scale);\n");
+		strcpy(emulated + at, body_end);
+		text = emulated;
+	}
 	glShaderSource(shader, 1, &text, NULL);
 	glCompileShader(shader);
 	glAttachShader(program, shader);
@@ -2225,7 +2259,19 @@ plain_program(const char *fragment, const char *what)
 	glBindAttribLocation(program, 2, "vertex_texcoord0");
 	glLinkProgram(program);
 	glGetProgramiv(program, GL_LINK_STATUS, &good);
-	say("redwood-gl: a program of ours for the draws CoreAnimation makes with none (%s): %s\n", what, good ? "made" : "NOT MADE");
+	say("redwood-gl: a program of ours for the draws CoreAnimation makes with none (%s): %s%s\n", what, good ? "made" : "NOT MADE",
+	    emulated != NULL ? " (framebuffer fetch emulated)" : "");
+	if (!good) {
+		GLchar log[512] = "";
+
+		glGetShaderInfoLog(shader, sizeof(log), NULL, log);
+		say("redwood-gl: %s\n", log);
+	}
+	if (emulated != NULL && good && program < 4096) {
+		program_fetch[program].fb = glGetUniformLocation(program, "redwood_fb") + 1;
+		program_fetch[program].scale = glGetUniformLocation(program, "redwood_fb_scale") + 1;
+	}
+	free(emulated);
 	return program;
 }
 
@@ -2668,6 +2714,7 @@ group_flatten(struct eagl *e, GLuint texture, struct group_texture *g)
 	} else if (group_programs(e)) {
 		glDisable(GL_BLEND);
 		glUseProgram(e->group_flat);
+		fetch_bind_program(e, e->group_flat);
 		glUniformMatrix4fv(e->group_flat_matrix, 1, 0, identity);
 		glUniform4fv(e->group_flat_colour, 1, flat);
 		for (GLuint i = 0; i < 3; i++) {
@@ -2814,6 +2861,7 @@ group_draw_begin(struct eagl *e, GLint enabled[4])
 		group_covered++;
 	} else {
 		glUseProgram(e->group_over);
+		fetch_bind_program(e, e->group_over);
 		glUniformMatrix4fv(e->group_over_matrix, 1, 0, matrix);
 		glUniform4fv(e->group_over_texmat, 1, texmat);
 		glUniform4fv(e->group_over_colours, 5, colours);
@@ -2932,6 +2980,7 @@ plain_draw_begin(struct eagl *e, GLint enabled[4])
 		census_draw(e, function, vibrant ? CENSUS_VIBRANT : CENSUS_MASKING);
 		program = vibrant ? e->vibrant : e->masking;
 		glUseProgram(program);
+		fetch_bind_program(e, program);
 		glUniformMatrix4fv(vibrant ? e->vibrant_matrix : e->masking_matrix, 1, 0, e->matrix != NULL ? e->matrix : identity);
 		glUniform4fv(vibrant ? e->vibrant_colours : e->masking_colours, 5, function_values[function]);
 		if (vibrant && glIsEnabled(GL_BLEND)) {
@@ -3814,16 +3863,22 @@ static const char vertex_start[] =
     "#line 1\n";
 
 static bool shader_fetch[4096];                 /* shaders that read gl_LastFragData (emulated) */
-static struct { GLint fb, scale; } program_fetch[4096];  /* their programs' uniforms, +1 (0: not one) */
 static unsigned fetch_draws;
 
 /* before a draw: the framebuffer's texture where the program reads it (fetch_emulated) */
 static void
 fetch_bind(struct eagl *e)
 {
+	fetch_bind_program(e, e->program);
+}
+
+/* the same for a program of ours, already in use */
+static void
+fetch_bind_program(struct eagl *e, GLuint program)
+{
 	GLint w = 0, h = 0;
 
-	if (e->program == 0 || e->program >= 4096 || program_fetch[e->program].fb == 0 || e->colour == 0) {
+	if (program == 0 || program >= 4096 || program_fetch[program].fb == 0 || e->colour == 0) {
 		return;
 	}
 	glFlush();                              /* (the draws so far written out before they are read) */
@@ -3833,9 +3888,9 @@ fetch_bind(struct eagl *e)
 	glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &w);
 	glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &h);
 	glActiveTexture(GL_TEXTURE0 + e->unit);
-	glUniform1i(program_fetch[e->program].fb - 1, 15);
-	if (program_fetch[e->program].scale > 0) {
-		glUniform2f(program_fetch[e->program].scale - 1, w > 0 ? 1.0f / (GLfloat)w : 1.0f, h > 0 ? 1.0f / (GLfloat)h : 1.0f);
+	glUniform1i(program_fetch[program].fb - 1, 15);
+	if (program_fetch[program].scale > 0) {
+		glUniform2f(program_fetch[program].scale - 1, w > 0 ? 1.0f / (GLfloat)w : 1.0f, h > 0 ? 1.0f / (GLfloat)h : 1.0f);
 	}
 	fetch_draws++;
 }
