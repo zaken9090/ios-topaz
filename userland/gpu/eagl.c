@@ -4976,7 +4976,7 @@ install(void)
 		solid_on = strstr(arguments, "glsolid=0") == NULL;
 		zero_on = strstr(arguments, "glzero=0") == NULL;
 		order_on = strstr(arguments, "glorder=0") == NULL;
-		order_mesa_textures = strstr(arguments, "glorder=2") != NULL;
+		order_mesa_textures = strstr(arguments, "glorder=1") == NULL;   /* lavender: 2 by default (fewer flushes: each makes and frees a whole Mesa batch); glorder=1: as before */
 		cubic_on = strstr(arguments, "glcubic=0") == NULL;
 		box_inner = strstr(arguments, "glbox=4") != NULL;
 		if ((argument = strstr(arguments, "glprof=")) != NULL) {
