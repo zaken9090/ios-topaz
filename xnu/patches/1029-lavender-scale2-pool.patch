@@ -1,0 +1,29 @@
+From b23d9e69f7524555bc83a4f5e465c30b37a421d2 Mon Sep 17 00:00:00 2001
+From: zaken9090 <zaken9090@users.noreply.github.com>
+Date: Sun, 22 Nov 2026 03:00:26 +0200
+Subject: [PATCH] lavender: presented-size (750x1624, sweetfb_scale2) display
+ surfaces come from the GPU pool too, so the MDP scans and scales them
+
+---
+ iokit/Kernel/arm/SweetSurface.cpp | 5 ++++-
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+
+diff --git a/iokit/Kernel/arm/SweetSurface.cpp b/iokit/Kernel/arm/SweetSurface.cpp
+index 83b7cfc..db14dc6 100644
+--- a/iokit/Kernel/arm/SweetSurface.cpp
++++ b/iokit/Kernel/arm/SweetSurface.cpp
+@@ -708,7 +708,10 @@ sweet_gpu_pool_eligible(const SweetSurface *s)
+ 		}
+ 	}
+ 	if (!(gpu && s->bytesPerElement == 4 && s->planeCount <= 1 && s->elementWidth == 1 && s->elementHeight == 1 &&
+-	    s->width >= 1000 && s->height >= 2000 && s->allocSize <= (48u << 20))) {
++	    ((s->width >= 1000 && s->height >= 2000) ||
++	     /* lavender (sweetfb_scale2): the presented size, 750x1624 */
++	     (sweet_scanout_w[1] != 0 && s->width == sweet_scanout_w[1] && s->height == sweet_scanout_h[1])) &&
++	    s->allocSize <= (48u << 20))) {
+ 		return false;
+ 	}
+ 	/* only the window server's own (the display's frames); applications' screen-sized surfaces came out black */
+-- 
+2.56.0.windows.4
+
