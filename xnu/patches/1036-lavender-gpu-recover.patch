@@ -1,0 +1,111 @@
+From 20c15980f569924138c8b02620b01c383d8d5882 Mon Sep 17 00:00:00 2001
+From: zaken9090 <zaken9090@users.noreply.github.com>
+Date: Sun, 22 Nov 2026 18:17:06 +0200
+Subject: [PATCH] lavender: GPU hang - full a5xx state in the report (IB1/IB2,
+ scratch, ring at rptr) and recovery (SW reset, zap, CP; gpurecover=0: off)
+
+
+diff --git a/iokit/Kernel/arm/RedwoodGPU.cpp b/iokit/Kernel/arm/RedwoodGPU.cpp
+index 0f57df8..55ec267 100644
+--- a/iokit/Kernel/arm/RedwoodGPU.cpp
++++ b/iokit/Kernel/arm/RedwoodGPU.cpp
+@@ -69,6 +69,7 @@ bool redwood_gpu_done(uint32_t fence);
+ uint32_t redwood_gpu_last(void);
+ void redwood_gpu_worked(uint64_t * microseconds, uint32_t * submissions, uint32_t by[7]);
+ void redwood_gpu_report(const char * why);
++bool redwood_gpu_recover(void);
+ void redwood_gpu_stop(void);
+ 
+ void RedwoodGPUStart(void);
+@@ -221,8 +222,17 @@ gpuWait(uint32_t fence, uint64_t milliseconds)
+ 		IOLockLock(gGPULock);
+ 	}
+ 	if (milliseconds >= 1000 && !gGPUReported) {
++		static uint32_t recovered;
++		uint32_t recover = 1;
++
+ 		gGPUReported = true;
+ 		redwood_gpu_report("no answer");
++		PE_parse_boot_argn("gpurecover", &recover, sizeof(recover));
++		if (recover != 0 && recovered < 20 && redwood_gpu_recover()) {
++			recovered++;
++			gGPUReported = false;           /* (lavender: going on after a reset) */
++			IOLog("RedwoodGPU: the GPU was reset (%u so far)\n", recovered);
++		}
+ 	}
+ 	return false;
+ }
+diff --git a/iokit/Kernel/arm/TopazAdreno.cpp b/iokit/Kernel/arm/TopazAdreno.cpp
+index c176467..5298591 100644
+--- a/iokit/Kernel/arm/TopazAdreno.cpp
++++ b/iokit/Kernel/arm/TopazAdreno.cpp
+@@ -52,6 +52,7 @@ bool redwood_gpu_done(uint32_t fence);
+ uint32_t redwood_gpu_last(void);
+ void redwood_gpu_worked(uint64_t *microseconds, uint32_t *submissions, uint32_t by[7]);
+ void redwood_gpu_report(const char *why);
++bool redwood_gpu_recover(void);
+ void redwood_gpu_stop(void);
+ void redwood_tl(const char *format, ...) __printflike(1, 2);
+ uint32_t gpu_log;
+@@ -1437,13 +1438,58 @@ redwood_gpu_submit(const uint64_t *addresses, const uint32_t *words, uint32_t co
+ void
+ redwood_gpu_report(const char *why)
+ {
+-	uint64_t ib1 = 0;                               /* (a5xx IB1 registers not wired up yet) */
++	/* lavender: a5xx CP_IB1_BASE/BUFSZ 0xb1f-0xb21, CP_IB2 0xb22-0xb24 (Linux a5xx.xml.h) */
++	uint64_t ib1 = gpu_rd(0xb1f) | ((uint64_t)gpu_rd(0xb20) << 32);
++	uint64_t ib2 = gpu_rd(0xb22) | ((uint64_t)gpu_rd(0xb23) << 32);
++	uint32_t rptr = gpu_rd(0x806);
++
+ 	IOLog("TopazGPU: %s: fence %u done %u rptr %u wptr %u RBBM_STATUS %08x CP_HW_FAULT %08x IB1 %llx rem %u\n", why,
+-	    seqno, mem.va ? *(volatile uint32_t *)mem.va : 0, gpu_rd(0x806), wptr % RB_DWORDS, gpu_rd(0x4f5),
+-	    gpu_rd(0xb1a), ib1, 0u);
++	    seqno, mem.va ? *(volatile uint32_t *)mem.va : 0, rptr, wptr % RB_DWORDS, gpu_rd(0x4f5),
++	    gpu_rd(0xb1a), ib1, gpu_rd(0xb21));
++	IOLog("TopazGPU: %s: IB2 %llx rem %u STATUS3 %08x INT0 %08x CP_INT %08x PROTECT %08x SCRATCH %08x %08x %08x %08x\n", why,
++	    ib2, gpu_rd(0xb24), gpu_rd(0x530), gpu_rd(0x4e1), gpu_rd(0xb18), gpu_rd(0x8a1), gpu_rd(0xb78), gpu_rd(0xb79),
++	    gpu_rd(0xb7a), gpu_rd(0xb7b));
++	if (ring.va != NULL) {
++		/* the ring just before and at the CP's read pointer: which IB it took last */
++		for (uint32_t row = 0; row < 3; row++) {
++			uint32_t at = (rptr + RB_DWORDS - 16 + row * 8) % RB_DWORDS;
++			volatile uint32_t *r = (volatile uint32_t *)ring.va;
++			IOLog("TopazGPU: ring @%u: %08x %08x %08x %08x %08x %08x %08x %08x\n", at, r[at], r[(at + 1) % RB_DWORDS],
++			    r[(at + 2) % RB_DWORDS], r[(at + 3) % RB_DWORDS], r[(at + 4) % RB_DWORDS], r[(at + 5) % RB_DWORDS],
++			    r[(at + 6) % RB_DWORDS], r[(at + 7) % RB_DWORDS]);
++		}
++	}
+ 	smmu_fault(why);
+ }
+ 
++/*
++ * lavender: a GPU that stopped answering (a few boots in a hundred, mostly in the first minute)
++ * left the screen frozen for good. As Linux a5xx_recover(): software reset, then the zap shader
++ * and the CP again; what was waiting is given up (its fence written as done). Boot-arg
++ * gpurecover=0: stays stopped, as before.
++ */
++bool
++redwood_gpu_recover(void)
++{
++	bool ok;
++
++	IOLockLock(hw_lock);
++	gpu_wr(0x43, 1);                                /* RBBM_SW_RESET_CMD */
++	(void)gpu_rd(0x43);
++	IODelay(100);
++	gpu_wr(0x43, 0);
++	IODelay(100);
++	ok = zap_load() && cp_start();
++	if (ok && mem.va != NULL) {
++		*(volatile uint32_t *)mem.va = seqno;   /* everything given before is over */
++		sweet_dcache_clean((vm_offset_t)mem.va, 64);
++	}
++	IOLockUnlock(hw_lock);
++	IOLog("TopazGPU: recovery %s: RBBM_STATUS %08x rptr %u wptr %u fence %u\n", ok ? "done" : "FAILED", gpu_rd(0x4f5),
++	    gpu_rd(0x806), wptr % RB_DWORDS, seqno);
++	return ok;
++}
++
+ void
+ redwood_gpu_stop(void)
+ {
