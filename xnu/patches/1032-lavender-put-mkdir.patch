@@ -1,0 +1,58 @@
+From f87b6fd4d3a892134fd2dac3ea95cabc49b0a712 Mon Sep 17 00:00:00 2001
+From: zaken9090 <zaken9090@users.noreply.github.com>
+Date: Sun, 22 Nov 2026 04:16:42 +0200
+Subject: [PATCH] lavender: lv:put makes the directories the file goes into
+
+---
+
+diff --git a/bsd/dev/sweet_usb.c b/bsd/dev/sweet_usb.c
+index d3b166f..caf3c29 100644
+--- a/bsd/dev/sweet_usb.c
++++ b/bsd/dev/sweet_usb.c
+@@ -1346,6 +1346,18 @@ ud_put_thread(void *arg __unused, wait_result_t wr __unused)
+ 	vnode_t vp = NULLVP;
+ 	int resid = 0, err;
+ 
++	/* lavender: the directories the file goes into, made where missing (bsd/vfs: sweet_mkdir_kernel) */
++	{
++		extern int sweet_mkdir_kernel(const char *path);
++		char dir[sizeof(ud_put_path)];
++		for (size_t i = 1; ud_put_path[i] != 0 && i < sizeof(dir); i++) {
++			if (ud_put_path[i] == '/') {
++				memcpy(dir, ud_put_path, i);
++				dir[i] = 0;
++				(void)sweet_mkdir_kernel(dir);
++			}
++		}
++	}
+ 	err = unlink1(ctx, NULLVP, CAST_USER_ADDR_T(ud_put_path), UIO_SYSSPACE, 0);
+ 	int uerr = err;
+ 	err = vnode_open(ud_put_path, O_CREAT | O_TRUNC | FWRITE, 0755, 0, &vp, ctx);
+-- 
+2.56.0.windows.4
+diff --git a/bsd/vfs/vfs_syscalls.c b/bsd/vfs/vfs_syscalls.c
+index 23ee4d5..6f38dc0 100644
+--- a/bsd/vfs/vfs_syscalls.c
++++ b/bsd/vfs/vfs_syscalls.c
+@@ -9846,6 +9846,21 @@ out:
+  *                !0                      Not success
+  *
+  */
++/*
++ * lavender: a directory made by the kernel itself, for a path in kernel memory (sweet_usb.c lv:put
++ * makes the directories a file it is given goes into).
++ */
++int sweet_mkdir_kernel(const char *path);
++int
++sweet_mkdir_kernel(const char *path)
++{
++	struct vnode_attr va;
++
++	VATTR_INIT(&va);
++	VATTR_SET(&va, va_mode, 0755);
++	return mkdir1at(vfs_context_kernel(), CAST_USER_ADDR_T(path), &va, AT_FDCWD, UIO_SYSSPACE);
++}
++
+ int
+ mkdir_extended(proc_t p, struct mkdir_extended_args *uap, __unused int32_t *retval)
+ {
