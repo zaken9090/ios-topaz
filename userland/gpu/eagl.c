@@ -1937,6 +1937,33 @@ static const char masking_fragment[] =
  *   Drawn as it was given, one sample in the middle, four pixels of the sixty-four made the one:
  *   what is blurred after that shimmers when it moves.
  */
+/* glbox=4: only the four inner samples (a 4 x 4 average about the middle), for telling where a fault comes from */
+static int box_inner;
+static const char box_inner_fragment[] =
+    "#version 300 es
+"
+    "uniform lowp sampler2D texture0;
+"
+    "uniform highp vec2 places[4];
+"
+    "in lowp vec4 color;
+"
+    "in highp vec2 texcoord;
+"
+    "out lowp vec4 result;
+"
+    "void main() {
+"
+    "  highp vec2 middle = texcoord / vec2(textureSize(texture0, 0));
+"
+    "  highp vec4 sum = textureLod(texture0, middle + places[0], 0.) + textureLod(texture0, middle - places[0], 0.);
+"
+    "  sum += textureLod(texture0, middle + places[0] * vec2(1., -1.), 0.) + textureLod(texture0, middle + places[0] * vec2(-1., 1.), 0.);
+"
+    "  result = color * sum * .25;
+"
+    "}
+";
 static const char box_fragment[] =
     "#version 300 es\n"
     "uniform lowp sampler2D texture0;\n"
@@ -3114,7 +3141,7 @@ plain_draw_begin(struct eagl *e, GLint enabled[4])
 	}
 	if (e->bound[0] != 0 && plain_draws != 3 && !no_ds8 && function == FUNCTION_DOWNSAMPLE_8 && function_given[function] == 8) {
 		if (e->box == 0) {
-			e->box = plain_program(box_fragment, "eight times smaller, sixteen samples");
+			e->box = plain_program(box_inner ? box_inner_fragment : box_fragment, box_inner ? "eight times smaller, four inner samples" : "eight times smaller, sixteen samples");
 			e->box_matrix = glGetUniformLocation(e->box, "vertex_matrix");
 			e->box_places = glGetUniformLocation(e->box, "places");
 		}
@@ -4485,6 +4512,7 @@ install(void)
 		order_on = strstr(arguments, "glorder=0") == NULL;
 		order_mesa_textures = strstr(arguments, "glorder=2") != NULL;
 		cubic_on = strstr(arguments, "glcubic=1") != NULL;
+		box_inner = strstr(arguments, "glbox=4") != NULL;
 		if ((argument = strstr(arguments, "glno=")) != NULL) {
 			size_t n = strcspn(argument, " ");
 			no_vcm = memmem(argument, n, "vcm", 3) != NULL;
