@@ -99,6 +99,16 @@ int
 drmCommandWriteRead(int fd, unsigned long index, void *data, unsigned long size)
 {
 	(void)fd;
+	/*
+	 * lavender: DRM_MSM_GEM_MADVISE (0x08: handle, madv, retained) answered here. freedreno's buffer
+	 * cache marks every buffer it frees and takes back again, thousands a second; the kernel
+	 * only says "retained" (it never purges), and each call's trip through IOKit cost ~18% of
+	 * the window server's drawing thread (glprof, 2026-11-22).
+	 */
+	if (index == 0x08 && data != NULL && size >= 12) {
+		((uint32_t *)data)[2] = 1;
+		return 0;
+	}
 	return -call((unsigned)(DRM_COMMAND_BASE + index), data, size);
 }
 
