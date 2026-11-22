@@ -3835,7 +3835,7 @@ static const char fragment_start[] =
     "  return g0.y * (g0.x * textureLod(s, h0, 0.) + g1.x * textureLod(s, vec2(h1.x, h0.y), 0.)) +\n"
     "         g1.y * (g0.x * textureLod(s, vec2(h0.x, h1.y), 0.) + g1.x * textureLod(s, h1, 0.));\n"
     "}\n";
-static int cubic_on = 1;
+static int cubic_on = 0;   /* off by default: garbles widget text and the status bar battery for now (glcubic=1 to try) */
 /*
  * What a fragment shader of the first version writes to (gl_FragData), and with the extension a
  * GPU's driver offers and CoreAnimation then uses (EXT_shader_framebuffer_fetch) reads what is
@@ -4375,7 +4375,7 @@ install(void)
 		zero_on = strstr(arguments, "glzero=0") == NULL;
 		order_on = strstr(arguments, "glorder=0") == NULL;
 		order_mesa_textures = strstr(arguments, "glorder=2") != NULL;
-		cubic_on = strstr(arguments, "glcubic=0") == NULL;
+		cubic_on = strstr(arguments, "glcubic=1") != NULL;
 		sync_on = strstr(arguments, "glsync=0") == NULL;
 		mip_flush = strstr(arguments, "glmipflush=0") == NULL;
 		no_mip = strstr(arguments, "glnomip=1") != NULL;
