@@ -28,7 +28,7 @@
 +      }
 +      fd_batch_reference(&batch, NULL);
 +   }
-+   fd_context_flush(pctx, NULL, 0);
++   pctx->flush(pctx, NULL, 0);   /* (fd_context_flush is static in freedreno_context.c) */
 +}
  
  static void
