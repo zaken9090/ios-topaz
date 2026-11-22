@@ -603,7 +603,10 @@ dump_draw(struct eagl *e)
 
 	glGetIntegerv(GL_VIEWPORT, viewport);
 	/* gldumpvp=WxH,N: from the first draw into a viewport of that size on, N draws of that frame */
-	if (dump_vp_w != 0 && dump_frame == 0 && e->frames + 1 >= dump_from && viewport[2] == dump_vp_w && viewport[3] == dump_vp_h) {
+	/* (gldumpvp=0x0,N: the first draw with no program into a viewport under 128 x 128 - the blur's ds8) */
+	if (dump_vp_n != 0 && dump_frame == 0 && e->frames + 1 >= dump_from &&
+	    (dump_vp_w != 0 ? viewport[2] == dump_vp_w && viewport[3] == dump_vp_h :
+	    e->program == 0 && viewport[2] < 128 && viewport[3] < 128)) {
 		dump_frame = e->frames + 1;
 		dump_first = e->draws;
 		dump_last = e->draws + dump_vp_n;
