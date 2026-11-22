@@ -1336,9 +1336,11 @@ frame_end(struct eagl *e, bool finished)
 	if (e->frames <= 40 || e->frames % 20 == 0) {
 		say("redwood-gl: frame %u: %u GL calls, %u draws, %u triangles, %u clears; %u textures refilled from IOSurfaces "
 		    "(%llu KB); %u picture%s copied out, %u drawn in place; %llu us (%llu handing on, %llu waiting, %llu copying "
-		    "out), %llu before it for the IOSurfaces; flushes %u CA %u order %u mirror %u mip %u fetch\n", e->frames, e->calls, e->draws, e->triangles, e->clears, e->uploads,
+		    "out), %llu before it for the IOSurfaces\n", e->frames, e->calls, e->draws, e->triangles, e->clears, e->uploads,
 		    e->upload_bytes >> 10, copied, copied == 1 ? "" : "s", in_place, after - e->began, e->flushing, waited - before,
-		    after - waited, e->attaching, fl_app, fl_order, fl_mirror, fl_mip, fl_fetch);
+		    after - waited, e->attaching);
+		say("redwood-gl: frame %u flushes: %u CA, %u order, %u mirror, %u mip, %u fetch; %llu us flushing\n", e->frames,
+		    fl_app, fl_order, fl_mirror, fl_mip, fl_fetch, e->flushing);
 	}
 	fl_app = fl_order = fl_mirror = fl_mip = fl_fetch = 0;
 	if (e->frames == 30 || e->frames % 200 == 0) {
