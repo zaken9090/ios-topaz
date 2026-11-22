@@ -567,10 +567,14 @@ static unsigned order_flushes;
 static uint32_t drawn_surfaces[16];
 static unsigned drawn_count;
 
+static GLuint drawn_textures[32];
+static unsigned drawn_tex_count;
+
 static void
 order_forget(void)
 {
 	drawn_count = 0;
+	drawn_tex_count = 0;
 }
 
 static void fetch_bind(struct eagl *e);
@@ -659,7 +663,13 @@ order_before_draw(struct eagl *e)
 		}
 		if (texture == e->colour) {
 			flush = true;
-		} else if (drawn_count != 0 && (image = image_of(e, texture)) != NULL && !image->target && image->surface != NULL) {
+		} else if (drawn_tex_count != 0) {
+			/* a texture drawn into since the last flush (a display surface's frame read as the backdrop of a blur) */
+			for (unsigned i = 0; i < drawn_tex_count; i++) {
+				flush |= drawn_textures[i] == texture;
+			}
+		}
+		if (!flush && drawn_count != 0 && (image = image_of(e, texture)) != NULL && !image->target && image->surface != NULL) {
 			uint32_t id = IOSurfaceGetID(image->surface);
 			for (unsigned i = 0; i < drawn_count; i++) {
 				if (drawn_surfaces[i] == id) {
@@ -672,6 +682,20 @@ order_before_draw(struct eagl *e)
 			order_flushes++;
 			order_forget();
 			break;
+		}
+	}
+	if (e->colour != 0) {
+		bool have = false;
+		for (unsigned i = 0; i < drawn_tex_count; i++) {
+			have |= drawn_textures[i] == e->colour;
+		}
+		if (!have) {
+			if (drawn_tex_count == 32) {
+				glFlush();
+				order_flushes++;
+				order_forget();
+			}
+			drawn_textures[drawn_tex_count++] = e->colour;
 		}
 	}
 	if (e->colour != 0 && (image = image_of(e, e->colour)) != NULL && image->target && image->surface != NULL) {
