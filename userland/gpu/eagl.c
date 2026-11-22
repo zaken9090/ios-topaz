@@ -1940,30 +1940,18 @@ static const char masking_fragment[] =
 /* glbox=4: only the four inner samples (a 4 x 4 average about the middle), for telling where a fault comes from */
 static int box_inner;
 static const char box_inner_fragment[] =
-    "#version 300 es
-"
-    "uniform lowp sampler2D texture0;
-"
-    "uniform highp vec2 places[4];
-"
-    "in lowp vec4 color;
-"
-    "in highp vec2 texcoord;
-"
-    "out lowp vec4 result;
-"
-    "void main() {
-"
-    "  highp vec2 middle = texcoord / vec2(textureSize(texture0, 0));
-"
-    "  highp vec4 sum = textureLod(texture0, middle + places[0], 0.) + textureLod(texture0, middle - places[0], 0.);
-"
-    "  sum += textureLod(texture0, middle + places[0] * vec2(1., -1.), 0.) + textureLod(texture0, middle + places[0] * vec2(-1., 1.), 0.);
-"
-    "  result = color * sum * .25;
-"
-    "}
-";
+    "#version 300 es\n"
+    "uniform lowp sampler2D texture0;\n"
+    "uniform highp vec2 places[4];\n"
+    "in lowp vec4 color;\n"
+    "in highp vec2 texcoord;\n"
+    "out lowp vec4 result;\n"
+    "void main() {\n"
+    "  highp vec2 middle = texcoord / vec2(textureSize(texture0, 0));\n"
+    "  highp vec4 sum = textureLod(texture0, middle + places[0], 0.) + textureLod(texture0, middle - places[0], 0.);\n"
+    "  sum += textureLod(texture0, middle + places[0] * vec2(1., -1.), 0.) + textureLod(texture0, middle + places[0] * vec2(-1., 1.), 0.);\n"
+    "  result = color * sum * .25;\n"
+    "}\n";
 static const char box_fragment[] =
     "#version 300 es\n"
     "uniform lowp sampler2D texture0;\n"
