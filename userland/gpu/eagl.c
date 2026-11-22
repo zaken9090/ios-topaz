@@ -603,6 +603,7 @@ static void live_drawn(struct image *image);
 #endif
 static unsigned dump_frame, dump_first, dump_last;
 static GLint dump_vp_w, dump_vp_h, dump_vp_n;
+static unsigned dump_every;                     /* gldumpevery=K: gldumpvp again K frames after the last */
 static unsigned dump_from;                      /* gldumpfrom=FRAME: gldumpvp only from that frame on */
 
 static void
@@ -614,6 +615,9 @@ dump_draw(struct eagl *e)
 	GLsizei w, h;
 
 	glGetIntegerv(GL_VIEWPORT, viewport);
+	if (dump_every != 0 && dump_vp_n != 0 && dump_frame != 0 && e->frames + 1 >= dump_frame + dump_every) {
+		dump_frame = 0;
+	}
 	/* gldumpvp=WxH,N: from the first draw into a viewport of that size on, N draws of that frame */
 	/* (gldumpvp=0x0,N: the first draw with no program into a viewport under 128 x 128 - the blur's ds8) */
 	if (dump_vp_n != 0 && dump_frame == 0 && e->frames + 1 >= dump_from &&
@@ -628,8 +632,8 @@ dump_draw(struct eagl *e)
 	}
 	w = viewport[2] < 48 ? viewport[2] : 48;
 	h = viewport[3] < 96 ? viewport[3] : 96;
-	say("gldump %u %u fb %u colour %u program %u viewport %d x %d: %d x %d\n", dump_frame, e->draws, e->framebuffer, e->colour,
-	    e->program, viewport[2], viewport[3], w, h);
+	say("gldump %u %u fb %u colour %u program %u source %u viewport %d x %d: %d x %d\n", dump_frame, e->draws, e->framebuffer, e->colour,
+	    e->program, e->bound[0], viewport[2], viewport[3], w, h);
 	for (GLsizei y = 0; y < h; y++) {
 		glReadPixels(0, y, w, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
 		for (GLsizei i = 0; i < w * 4; i++) {
@@ -4492,6 +4496,9 @@ install(void)
 		no_mip = strstr(arguments, "glnomip=1") != NULL;
 		if ((argument = strstr(arguments, "gldumpfrom=")) != NULL) {
 			dump_from = (unsigned)strtoul(argument + 11, NULL, 10);
+		}
+		if ((argument = strstr(arguments, "gldumpevery=")) != NULL) {
+			dump_every = (unsigned)strtoul(argument + 12, NULL, 10);
 		}
 		if ((argument = strstr(arguments, "gldumpvp=")) != NULL) {
 			dump_vp_w = (GLint)strtoul(argument + 9, (char **)&argument, 10);
