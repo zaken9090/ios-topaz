@@ -1471,6 +1471,28 @@ static mach_port_t prof_target;
 static int prof_started;
 static struct { uintptr_t pc; uint32_t n; } prof_callers[4096];
 static uint32_t prof_kernel, prof_kernel_unwound;
+static struct { uintptr_t first, up; uint32_t n, depth; } prof_up[2048];
+
+static void
+prof_add_caller2(uintptr_t first, uintptr_t up, int depth)
+{
+	uint32_t h = (uint32_t)(((first ^ (up * 31)) >> 2) * 2654435761u) & 2047;
+
+	for (uint32_t i = 0; i < 64; i++) {
+		uint32_t k = (h + i) & 2047;
+		if (prof_up[k].first == first && prof_up[k].up == up && prof_up[k].depth == (uint32_t)depth) {
+			prof_up[k].n++;
+			return;
+		}
+		if (prof_up[k].first == 0) {
+			prof_up[k].first = first;
+			prof_up[k].up = up;
+			prof_up[k].depth = (uint32_t)depth;
+			prof_up[k].n = 1;
+			return;
+		}
+	}
+}
 static uintptr_t prof_k_lo, prof_k_hi;          /* libsystem_kernel's text, roughly (from dladdr of mach_msg) */
 static uintptr_t prof_stack_lo, prof_stack_hi;  /* the drawing thread's stack: frame pointers outside it are not followed */
 static uintptr_t prof_io_lo, prof_io_hi;        /* IOKit's text: a call into the driver is traced one more step, to who made it */
@@ -1566,6 +1588,12 @@ prof_main(void *arg)
 					if (ret != 0 && !(ret >= prof_k_lo && ret < prof_k_hi)) {
 						prof_add_caller(ret & 0x0000ffffffffffffull);
 						prof_kernel_unwound++;
+						/* two more frames, kept apart (who called the caller: what in Mesa waits on the driver) */
+						for (int d = 0; d < 2 && fp >= prof_stack_lo && fp + 16 <= prof_stack_hi && (fp & 7) == 0; d++) {
+							uintptr_t up = ((uintptr_t *)fp)[1] & 0x0000ffffffffffffull;
+							fp = ((uintptr_t *)fp)[0];
+							prof_add_caller2(ret & 0x0000ffffffffffffull, up, d);
+						}
 					}
 				}
 			}
@@ -1669,6 +1697,24 @@ prof_main(void *arg)
 			}
 			say("redwood-gl: glprof call %u %s+%#lx %s+%#lx\n", crow[a][1], name, (unsigned long)(pc - base), sym,
 			    (unsigned long)(saddr ? pc - saddr : 0));
+		}
+	}
+	/* the callers' callers with 50 samples or more: library+offset of both */
+	for (unsigned i = 0; i < 2048; i++) {
+		if (prof_up[i].first != 0 && prof_up[i].n >= 50) {
+			Dl_info a, b;
+			uintptr_t fa = 0, fb = 0;
+			const char *na = "?", *nb = "?";
+			if (dladdr((const void *)prof_up[i].first, &a)) {
+				fa = (uintptr_t)a.dli_fbase;
+				na = a.dli_fname && strrchr(a.dli_fname, '/') ? strrchr(a.dli_fname, '/') + 1 : "?";
+			}
+			if (dladdr((const void *)prof_up[i].up, &b)) {
+				fb = (uintptr_t)b.dli_fbase;
+				nb = b.dli_fname && strrchr(b.dli_fname, '/') ? strrchr(b.dli_fname, '/') + 1 : "?";
+			}
+			say("redwood-gl: glprof up%u %u %s+%#lx <- %s+%#lx\n", prof_up[i].depth + 1, prof_up[i].n, na,
+			    (unsigned long)(prof_up[i].first - fa), nb, (unsigned long)(prof_up[i].up - fb));
 		}
 	}
 	say("redwood-gl: glprof: done\n");
