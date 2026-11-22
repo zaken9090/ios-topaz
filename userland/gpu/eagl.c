@@ -564,6 +564,8 @@ image_of(struct eagl *e, GLuint texture)
  */
 static int order_on = 1;
 static unsigned order_flushes;
+/* glFlush calls in this frame, by who asked: CoreAnimation, glorder, a mirror copy, glGenerateMipmap, fbfetch */
+static unsigned fl_app, fl_order, fl_mirror, fl_mip, fl_fetch;
 static uint32_t drawn_surfaces[16];
 static unsigned drawn_count;
 
@@ -683,6 +685,7 @@ order_before_draw(struct eagl *e)
 		if (flush) {
 			glFlush();
 			order_flushes++;
+			fl_order++;
 			order_forget();
 			break;
 		}
@@ -696,6 +699,7 @@ order_before_draw(struct eagl *e)
 			if (drawn_tex_count == 32) {
 				glFlush();
 				order_flushes++;
+				fl_order++;
 				order_forget();
 			}
 			drawn_textures[drawn_tex_count++] = e->colour;
@@ -711,6 +715,7 @@ order_before_draw(struct eagl *e)
 			if (drawn_count == 16) {
 				glFlush();              /* (too many to keep track of: the lot written out) */
 				order_flushes++;
+				fl_order++;
 				drawn_count = 0;
 			}
 			drawn_surfaces[drawn_count++] = id;
@@ -1239,6 +1244,7 @@ frame_end(struct eagl *e, bool finished)
 			target_to_surface(e, &e->images[i]);    /* (the GPU's copy: before what follows sends it out) */
 			in_place++;
 			glFlush();                              /* (also after a glFinish: the copy is new since) */
+			fl_mirror++;
 		}
 		if (e->images[i].target && e->images[i].drawn && e->images[i].shared) {
 			in_place++;
@@ -1330,10 +1336,11 @@ frame_end(struct eagl *e, bool finished)
 	if (e->frames <= 40 || e->frames % 20 == 0) {
 		say("redwood-gl: frame %u: %u GL calls, %u draws, %u triangles, %u clears; %u textures refilled from IOSurfaces "
 		    "(%llu KB); %u picture%s copied out, %u drawn in place; %llu us (%llu handing on, %llu waiting, %llu copying "
-		    "out), %llu before it for the IOSurfaces\n", e->frames, e->calls, e->draws, e->triangles, e->clears, e->uploads,
+		    "out), %llu before it for the IOSurfaces; flushes %u CA %u order %u mirror %u mip %u fetch\n", e->frames, e->calls, e->draws, e->triangles, e->clears, e->uploads,
 		    e->upload_bytes >> 10, copied, copied == 1 ? "" : "s", in_place, after - e->began, e->flushing, waited - before,
-		    after - waited, e->attaching);
+		    after - waited, e->attaching, fl_app, fl_order, fl_mirror, fl_mip, fl_fetch);
 	}
+	fl_app = fl_order = fl_mirror = fl_mip = fl_fetch = 0;
 	if (e->frames == 30 || e->frames % 200 == 0) {
 		summary(e);
 	}
@@ -3342,6 +3349,7 @@ my_glGenerateMipmap(void *context, GLenum target)
 	clear_now(e);
 	if (mip_flush) {
 		glFlush();
+		fl_mip++;
 	}
 	glGenerateMipmap(target);
 	EAGL_LEAVE(e, 0x1550);
@@ -3376,6 +3384,7 @@ my_glFlush(void *context)
 	clear_now(e);
 	began = now_us();
 	glFlush();
+	fl_app++;
 	order_forget();
 	e->flushing += now_us() - began;
 	frame_end(e, false);
@@ -3814,6 +3823,7 @@ fetch_bind(struct eagl *e)
 		return;
 	}
 	glFlush();                              /* (the draws so far written out before they are read) */
+	fl_fetch++;
 	glActiveTexture(GL_TEXTURE0 + 15);
 	glBindTexture(GL_TEXTURE_2D, e->colour);
 	glGetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &w);
