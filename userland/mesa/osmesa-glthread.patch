@@ -1,0 +1,22 @@
+--- a/src/gallium/frontends/osmesa/osmesa.c
++++ b/src/gallium/frontends/osmesa/osmesa.c
+@@ -62,6 +62,7 @@
+ #include <c11/threads.h>
+ 
+ #include "state_tracker/st_context.h"
++#include "main/glthread.h"
+ 
+ #include "glapi/glapi.h"  /* for OSMesaGetProcAddress below */
+ 
+@@ -686,6 +687,10 @@
+ 
+    osmesa->st->frontend_context = osmesa;
+ 
++   /* lavender: mesa_glthread=true: Mesa's own worker thread for the driver (DRI turns it on; OSMesa never did) */
++   if (debug_get_bool_option("mesa_glthread", false))
++      _mesa_glthread_init(osmesa->st->ctx), fprintf(stderr, "osmesa: glthread %s
+", osmesa->st->ctx->GLThread.enabled ? "on" : "NOT on");
++
+    osmesa->format = format;
+    osmesa->user_row_length = 0;
+    osmesa->y_up = GL_TRUE;
