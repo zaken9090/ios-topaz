@@ -1495,7 +1495,10 @@ prof_add_caller2(uintptr_t first, uintptr_t up, int depth)
 }
 static uintptr_t prof_k_lo, prof_k_hi;          /* libsystem_kernel's text, roughly (from dladdr of mach_msg) */
 static uintptr_t prof_stack_lo, prof_stack_hi;  /* the drawing thread's stack: frame pointers outside it are not followed */
-static uintptr_t prof_io_lo, prof_io_hi;        /* IOKit's text: a call into the driver is traced one more step, to who made it */
+static uintptr_t prof_io_lo, prof_io_hi;
+static uintptr_t prof_m_lo, prof_m_hi;          /* libsystem_malloc: its samples are traced to who allocated */
+static struct { uintptr_t pc; uint32_t n; } prof_mcallers[2048];
+static uint32_t prof_malloc;        /* IOKit's text: a call into the driver is traced one more step, to who made it */
 
 static void
 prof_add_caller(uintptr_t pc)
@@ -1554,6 +1557,10 @@ prof_main(void *arg)
 			prof_k_lo = (uintptr_t)info.dli_fbase;
 			prof_k_hi = prof_k_lo + 0x40000;        /* (its text is well under 256 KB) */
 		}
+		if (dladdr((const void *)malloc, &info)) {
+			prof_m_lo = (uintptr_t)info.dli_fbase;
+			prof_m_hi = prof_m_lo + 0x40000;
+		}
 		if (dladdr((const void *)IOConnectCallMethod, &info)) {
 			prof_io_lo = (uintptr_t)info.dli_fbase;
 			prof_io_hi = prof_io_lo + 0x60000;
@@ -1576,6 +1583,29 @@ prof_main(void *arg)
 
 				prof_add(pc);
 				prof_total++;
+				if (pc >= prof_m_lo && pc < prof_m_hi) {
+					uintptr_t ret = (uintptr_t)arm_thread_state64_get_lr(st), fp = (uintptr_t)arm_thread_state64_get_fp(st);
+
+					prof_malloc++;
+					for (int d = 0; d < 8 && ret >= prof_m_lo && ret < prof_m_hi && fp >= prof_stack_lo && fp + 16 <= prof_stack_hi && (fp & 7) == 0; d++) {
+						ret = ((uintptr_t *)fp)[1];
+						fp = ((uintptr_t *)fp)[0];
+					}
+					ret &= 0x0000ffffffffffffull;
+					uint32_t h = (uint32_t)((ret >> 2) * 2654435761u) & 2047;
+					for (uint32_t i = 0; i < 64; i++) {
+						uint32_t k = (h + i) & 2047;
+						if (prof_mcallers[k].pc == ret) {
+							prof_mcallers[k].n++;
+							break;
+						}
+						if (prof_mcallers[k].pc == 0) {
+							prof_mcallers[k].pc = ret;
+							prof_mcallers[k].n = 1;
+							break;
+						}
+					}
+				}
 				if (pc >= prof_k_lo && pc < prof_k_hi) {
 					/* in a system call: who made it (lr first, then the frame chain) */
 					uintptr_t ret = (uintptr_t)arm_thread_state64_get_lr(st), fp = (uintptr_t)arm_thread_state64_get_fp(st);
@@ -1715,6 +1745,19 @@ prof_main(void *arg)
 			}
 			say("redwood-gl: glprof up%u %u %s+%#lx <- %s+%#lx\n", prof_up[i].depth + 1, prof_up[i].n, na,
 			    (unsigned long)(prof_up[i].first - fa), nb, (unsigned long)(prof_up[i].up - fb));
+		}
+	}
+	say("redwood-gl: glprof: %u samples in malloc\n", prof_malloc);
+	for (unsigned i = 0; i < 2048; i++) {
+		if (prof_mcallers[i].pc != 0 && prof_mcallers[i].n * 100 >= prof_malloc && prof_malloc != 0) {
+			Dl_info info;
+			uintptr_t base = 0;
+			const char *name = "?";
+			if (dladdr((const void *)prof_mcallers[i].pc, &info)) {
+				base = (uintptr_t)info.dli_fbase;
+				name = info.dli_fname && strrchr(info.dli_fname, '/') ? strrchr(info.dli_fname, '/') + 1 : "?";
+			}
+			say("redwood-gl: glprof malloc %u %s+%#lx\n", prof_mcallers[i].n, name, (unsigned long)(prof_mcallers[i].pc - base));
 		}
 	}
 	say("redwood-gl: glprof: done\n");
