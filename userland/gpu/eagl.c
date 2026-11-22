@@ -3812,7 +3812,30 @@ static const char fragment_start[] =
     "#define texture2DRect(s, c) texture(s, (c) / vec2(textureSize(s, 0)))\n"
     "highp vec4 redwood_data[1];\n"
     "#define gl_FragData redwood_data\n"
-    "#define gl_FragColor redwood_data[0]\n";
+    "#define gl_FragColor redwood_data[0]\n"
+    /*
+     * lavender: a backdrop (a blur made at an eighth of the size, the widgets' plates, the shade,
+     * Spotlight) is read by CoreAnimation through coordinates clamped to its part of a texture
+     * (coord_arg) and stretched over the screen. Bilinear at eight times showed the blur's pixels
+     * as soft blocks ("low-pixel"), where an iPhone's blur is smooth. Where a texture so read is
+     * enlarged three times or more, it is read as a cubic B-spline (four bilinear samples, held
+     * inside the part): smooth, as the iPhone's. Boot-arg glcubic=0: as before.
+     */
+    "highp vec4 redwood_up(sampler2D s, highp vec2 uv, highp vec4 b) {\n"
+    "  highp vec2 size = vec2(textureSize(s, 0));\n"
+    "  highp vec2 d = fwidth(uv * size);\n"
+    "  highp vec4 plain = texture(s, uv);\n"
+    "  if (max(d.x, d.y) > .34) return plain;\n"
+    "  highp vec2 q = uv * size - .5, f = fract(q), i = q - f, f2 = f * f, f3 = f2 * f;\n"
+    "  highp vec2 w0 = (1. - 3. * f + 3. * f2 - f3) / 6., w1 = (4. - 6. * f2 + 3. * f3) / 6.;\n"
+    "  highp vec2 w2 = (1. + 3. * f + 3. * f2 - 3. * f3) / 6., w3 = f3 / 6.;\n"
+    "  highp vec2 g0 = w0 + w1, g1 = w2 + w3;\n"
+    "  highp vec2 lo = min(b.xy, b.zw), hi = max(b.xy, b.zw);\n"
+    "  highp vec2 h0 = clamp((i - .5 + w1 / g0) / size, lo, hi), h1 = clamp((i + 1.5 + w3 / g1) / size, lo, hi);\n"
+    "  return g0.y * (g0.x * textureLod(s, h0, 0.) + g1.x * textureLod(s, vec2(h1.x, h0.y), 0.)) +\n"
+    "         g1.y * (g0.x * textureLod(s, vec2(h0.x, h1.y), 0.) + g1.x * textureLod(s, h1, 0.));\n"
+    "}\n";
+static int cubic_on = 1;
 /*
  * What a fragment shader of the first version writes to (gl_FragData), and with the extension a
  * GPU's driver offers and CoreAnimation then uses (EXT_shader_framebuffer_fetch) reads what is
@@ -3947,7 +3970,40 @@ my_glShaderSource(void *context, GLuint shader, GLsizei count, const GLchar *con
 		extensions++;
 	}
 	parts[0] = head;
-	parts[3] = text;
+	char *rewritten = NULL;
+	if (fragment) {
+		/* a shader that uses coord_arg but does not declare it (one of CoreAnimation's: "coord_arg undeclared", not made) */
+		bool declare = strstr(text, "coord_arg") != NULL && strstr(text, "vec4 coord_arg") == NULL;
+		char *more = malloc(strlen(text) * 2 + 256);
+
+		if (more != NULL) {
+			char *to = more;
+
+			to += sprintf(to, "%s", declare ? "uniform highp vec4 coord_arg;\n" : "");
+			for (const char *at = text; *at != 0;) {
+				int k = -1;
+
+				if (cubic_on && strncmp(at, "texture2D(texture", 17) == 0 && at[17] >= '0' && at[17] <= '3' &&
+				    strncmp(at + 18, ", tc", 4) == 0 && at[22] == at[17] && strncmp(at + 23, "_0)", 3) == 0) {
+					char clamped[64];
+
+					snprintf(clamped, sizeof(clamped), "tc%c_0 = clamp(texcoord%c_0, coord_arg.xy, coord_arg.zw)", at[17], at[17]);
+					if (strstr(text, clamped) != NULL) {
+						k = at[17] - '0';
+					}
+				}
+				if (k >= 0) {
+					to += sprintf(to, "redwood_up(texture%d, tc%d_0, coord_arg)", k, k);
+					at += 26;
+				} else {
+					*to++ = *at++;
+				}
+			}
+			*to = 0;
+			rewritten = more;
+		}
+	}
+	parts[3] = rewritten != NULL ? rewritten : text;
 	if (fragment) {
 		fetch = strstr(text, "gl_LastFragData") != NULL;
 		parts[2] = fetch ? (fetch_emulated ? fragment_fetch_emulated : fragment_fetch) : fragment_plain;
@@ -3959,6 +4015,7 @@ my_glShaderSource(void *context, GLuint shader, GLsizei count, const GLchar *con
 	free((void *)e->sources[shader % 64]);
 	e->sources[shader % 64] = text;
 	glShaderSource(shader, 6, (const GLchar *const[6]){ parts[0], parts[5], parts[1], parts[2], parts[3], parts[4] }, NULL);
+	free(rewritten);
 	EAGL_LEAVE(e, 0x12a0);
 }
 
@@ -4318,6 +4375,7 @@ install(void)
 		zero_on = strstr(arguments, "glzero=0") == NULL;
 		order_on = strstr(arguments, "glorder=0") == NULL;
 		order_mesa_textures = strstr(arguments, "glorder=2") != NULL;
+		cubic_on = strstr(arguments, "glcubic=0") == NULL;
 		sync_on = strstr(arguments, "glsync=0") == NULL;
 		mip_flush = strstr(arguments, "glmipflush=0") == NULL;
 		no_mip = strstr(arguments, "glnomip=1") != NULL;
