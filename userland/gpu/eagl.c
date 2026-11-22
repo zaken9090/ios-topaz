@@ -1944,8 +1944,8 @@ static const char box_fragment[] =
     "  highp vec2 middle = texcoord / vec2(textureSize(texture0, 0));\n"
     "  highp vec4 sum = vec4(0.);\n"
     "  for (int i = 0; i < 4; i++) {\n"
-    "    sum += texture(texture0, middle + places[i]) + texture(texture0, middle - places[i]);\n"
-    "    sum += texture(texture0, middle + places[i] * vec2(1., -1.)) + texture(texture0, middle + places[i] * vec2(-1., 1.));\n"
+    "    sum += textureLod(texture0, middle + places[i], 0.) + textureLod(texture0, middle - places[i], 0.);\n"
+    "    sum += textureLod(texture0, middle + places[i] * vec2(1., -1.), 0.) + textureLod(texture0, middle + places[i] * vec2(-1., 1.), 0.);\n"
     "  }\n"
     "  result = color * sum * .0625;\n"
     "}\n";
