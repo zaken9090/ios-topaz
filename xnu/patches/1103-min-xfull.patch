@@ -4,16 +4,8 @@ that size and QSEED3 scales it (same proportions: no cut, no shift). Touches ove
 
 diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
 --- a/iokit/Kernel/arm/SweetFramebuffer.cpp	2026-11-23 15:37:05.423644248 +0000
-+++ b/iokit/Kernel/arm/SweetFramebuffer.cpp	2026-11-23 15:48:50.607805137 +0000
-@@ -94,6 +94,7 @@
- static void sweet_bl_log(const char *who, OSDictionary *d);
- extern "C" void sweet_dcache_clean(vm_offset_t addr, unsigned length);  /* osfmk/arm/caches.c */
- extern "C" vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
-+extern "C" vm_offset_t ml_io_map_wcomb(vm_offset_t phys_addr, vm_size_t size);     /* lavender-minimal: the splash region (sweetfb_xfull) */
- 
- #if defined(SWEET)
- #include <IOKit/IOService.h>
-@@ -170,6 +171,7 @@
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp	2026-11-23 16:05:42.878629891 +0000
+@@ -170,6 +170,7 @@
  	bool          fXr, fXrOn;               /* lavender-minimal: 828x1792 drawn, VIG0's QSEED3 scales it (sweetfb_xr) */
  	volatile uint32_t *fXrVig, *fXrCtl;     /* ... VIG0 (mdp+0x5000) and CTL0 (mdp+0x2000) */
  	void          xrEnable(void);
@@ -21,7 +13,7 @@ diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFrame
  	uintptr_t     fPixels;          /* kernel mapping of the panel memory */
  	IOMemoryMap  *fMap;
  	SweetSurface *fSurface;         /* the panel memory as an IOSurface */
-@@ -322,7 +324,7 @@
+@@ -322,7 +323,7 @@
  	if (fb == NULL || fb->fPixels == 0) {
  		return false;
  	}
@@ -30,7 +22,7 @@ diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFrame
  	*stride = fb->fXrOn ? fb->fLogicalW * 4 : fb->fRowBytes;
  	*w = fb->fXrOn ? fb->fLogicalW : fb->fWidth;
  	*h = fb->fXrOn ? fb->fLogicalH : fb->fHeight;
-@@ -369,15 +371,38 @@
+@@ -369,15 +370,42 @@
  		 * scanning it fetches 828x1792 and its QSEED3 scales that to the 1080x2340 panel. Single
  		 * buffered, no MDP flip: only the registers of the pipe ABL set up.
  		 */
@@ -50,7 +42,11 @@ diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFrame
 +			const uint32_t xw = 1125, xh = 2436;
 +			fXrVig = (volatile uint32_t *)ml_io_map(0x0c905000, 0x1000);
 +			fXrCtl = (volatile uint32_t *)ml_io_map(0x0c902000, 0x1000);
-+			fXrPixels = ml_io_map_wcomb((vm_offset_t)fPhys, (vm_size_t)round_page((uint64_t)xw * 4 * xh));
++			{
++				/* (as the panel memory itself: ml_io_map's io_submap has no room for 11 MB - a panic) */
++				SweetSurface *big = sweet_surface_create_physical(fPhys, xw, xh, xw * 4, SWEET_FB_FORMAT_BGRA);
++				fXrPixels = big != NULL ? big->kernelAddress() : 0;
++			}
 +			if (fXrVig != NULL && fXrCtl != NULL && fXrPixels != 0 && fXrVig[0x14 / 4] == (uint32_t)fPhys &&
 +			    (uint64_t)xw * 4 * xh <= 0x23ff000ull) {
 +				fXr = true;
@@ -71,7 +67,7 @@ diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFrame
  				fLogicalW = 828;
  				fLogicalH = 1792;
  				fOffX = fOffY = 0;
-@@ -1399,7 +1424,7 @@
+@@ -1399,7 +1427,7 @@
  	 * flip, like the direct path. Composing into the scanned, uncached boot
  	 * framebuffer showed every multi-layer frame (dims, apps) drawn top-down.
  	 */
@@ -80,7 +76,7 @@ diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFrame
  	/* lavender-minimal (sweetfb_xr): the picture is 828x1792 at stride 3328 in the boot framebuffer */
  	const uint32_t dW = fXr ? fLogicalW : fWidth, dH = fXr ? fLogicalH : fHeight, dStride = fXr ? fLogicalW * 4 : fRowBytes;
  	if (fXr && !fXrOn) {
-@@ -1512,7 +1537,7 @@
+@@ -1512,7 +1540,7 @@
  	const uint32_t sw = fLogicalW, sh = fLogicalH;
  	volatile uint32_t *sc = fXrVig + 0xa00 / 4;
  
@@ -89,7 +85,7 @@ diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFrame
  	fXrVig[0x00 / 4] = (sh << 16) | sw;             /* SSPP_SRC_SIZE */
  	fXrVig[0x04 / 4] = (sh << 16) | sw;             /* SSPP_SRC_IMG_SIZE */
  	fXrVig[0x08 / 4] = 0;                           /* SSPP_SRC_XY */
-@@ -1537,7 +1562,7 @@
+@@ -1537,7 +1565,7 @@
  	fXrCtl[0x18 / 4] = 0x20001;                     /* CTL0 FLUSH: VIG0 + CTL */
  	__asm__ volatile("dsb sy" ::: "memory");
  	fXrOn = true;
@@ -100,7 +96,7 @@ diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFrame
  bool
 diff --git a/iokit/Kernel/arm/hid/SweetHID.cpp b/iokit/Kernel/arm/hid/SweetHID.cpp
 --- a/iokit/Kernel/arm/hid/SweetHID.cpp	2026-11-23 15:37:05.425222275 +0000
-+++ b/iokit/Kernel/arm/hid/SweetHID.cpp	2026-11-23 15:48:50.607987957 +0000
++++ b/iokit/Kernel/arm/hid/SweetHID.cpp	2026-11-23 16:05:42.880390187 +0000
 @@ -437,10 +437,11 @@
  	PE_parse_boot_argn("sweetfb_native", &native, sizeof(native));
  	{
