@@ -472,7 +472,7 @@ topaz_inject(void)
 		container_manager_fixes();
 		return;
 	}
-	if (name != NULL && (strcmp(name, "assetsd") == 0 || strcmp(name, "AegirPoster") == 0)) {
+	if (name != NULL && (strcmp(name, "assetsd") == 0 || strcmp(name, "AegirPoster") == 0 || strcmp(name, "MobileSlideShow") == 0)) {
 		int console = open("/dev/console", O_WRONLY);     /* (launchd gives these daemons no stderr) */
 		if (console >= 0) {
 			dup2(console, 2);
