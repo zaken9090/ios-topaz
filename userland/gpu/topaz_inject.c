@@ -21,6 +21,8 @@
 #include <objc/runtime.h>
 #include <mach/mach.h>
 #include <stdint.h>
+#include <time.h>
+#include <errno.h>
 #include <mach-o/dyld.h>
 
 extern const void *_dyld_get_shared_cache_range(size_t *length);
@@ -431,6 +433,17 @@ topaz_inject(void)
 	}
 	if (sysctlbyname("kern.bootargs", args, &size, NULL, 0) != 0) {
 		args[0] = 0;
+	}
+	/*
+	 * lavender: boot-arg lv_photoreset=1: the photo library aside (assetsd threw on every start
+	 * after a day of forced restarts, Photos stayed black): /var/mobile/Media/PhotoData is renamed
+	 * PhotoData.bak-SECONDS, nothing is deleted; assetsd makes a new one.
+	 */
+	if (strstr(args, "lv_photoreset=1") != NULL && access("/var/mobile/Media/PhotoData", F_OK) == 0) {
+		char to[96];
+		snprintf(to, sizeof(to), "/var/mobile/Media/PhotoData.bak-%ld", (long)time(NULL));
+		int r = rename("/var/mobile/Media/PhotoData", to);
+		fprintf(stderr, "topaz-inject: photo library moved to %s: %s\n", to, r == 0 ? "done" : strerror(errno));
 	}
 	/*
 	 * lavender: boot-arg caenv=NAME=VALUE (as many as wanted) into the window server's
