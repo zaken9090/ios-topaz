@@ -1016,6 +1016,9 @@ surface_changed(struct eagl *e, struct image *image)
 	return true;
 }
 
+static int gpu_refill_on = 1;          /* boot-arg glgpurefill=0: a surface drawn here is read back from memory, as before */
+static unsigned gpu_refills;
+
 /* Fill a texture, which is bound, from its IOSurface, unless it is the surface. */
 static void
 surface_to_texture(struct eagl *e, struct image *image)
@@ -1030,6 +1033,49 @@ surface_to_texture(struct eagl *e, struct image *image)
 
 	if (image->shared) {
 		return;
+	}
+	/*
+	 * lavender: a surface this context draws into itself (a snapshot of an app: the cards of the
+	 * app switcher, the card that follows the finger when an app is closed) has the picture in the
+	 * texture it was drawn through; its memory gets it only at a frame's end, and the GPU may not
+	 * be done: read from memory, the card was black (2026-11-23). Copied by the GPU instead.
+	 */
+	if (gpu_refill_on) {
+		for (unsigned i = 0; i < e->image_count; i++) {
+			struct image *from = &e->images[i];
+
+			if (from == image || !from->target || from->surface != surface || from->width != image->width ||
+			    from->height != image->height || image->to != GL_TEXTURE_2D || planar) {
+				continue;
+			}
+			GLint read = 0, draw = 0;
+			GLboolean boxed = glIsEnabled(GL_SCISSOR_TEST);
+			bool flip = from->invert != image->invert;
+
+			glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &read);
+			glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &draw);
+			if (e->reader == 0) {
+				glGenFramebuffers(1, &e->reader);
+			}
+			if (e->writer == 0) {
+				glGenFramebuffers(1, &e->writer);
+			}
+			glBindFramebuffer(GL_READ_FRAMEBUFFER, e->reader);
+			glFramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, from->texture, 0);
+			glBindFramebuffer(GL_DRAW_FRAMEBUFFER, e->writer);
+			glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, image->texture, 0);
+			glDisable(GL_SCISSOR_TEST);
+			glBlitFramebuffer(0, flip ? image->height : 0, image->width, flip ? 0 : image->height, 0, 0, image->width,
+			    image->height, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+			glBindFramebuffer(GL_READ_FRAMEBUFFER, (GLuint)read);
+			glBindFramebuffer(GL_DRAW_FRAMEBUFFER, (GLuint)draw);
+			if (boxed) {
+				glEnable(GL_SCISSOR_TEST);
+			}
+			image->seed = IOSurfaceGetSeed(surface);
+			gpu_refills++;
+			return;
+		}
 	}
 	if (IOSurfaceLock(surface, kIOSurfaceLockReadOnly, NULL) != 0) {
 		say("redwood-gl: an IOSurface cannot be locked\n");
@@ -2003,8 +2049,8 @@ frame_end(struct eagl *e, bool finished)
 		    fl_app, fl_order, fl_mirror, fl_mip, fl_fetch, e->flushing);
 		say("redwood-gl: frame %u: %u last frames copied in\n", e->frames, preserves);
 		preserves = 0;
-		say("redwood-gl: frame %u live: %u syncs; reads of a surface drawn into through another texture: %u targets, %u shown, %u other\n",
-		    e->frames, live_syncs, live_reads_target, live_reads_shown, live_reads_other);
+		say("redwood-gl: frame %u live: %u syncs; reads of a surface drawn into through another texture: %u targets, %u shown, %u other; %u refills by the GPU\n",
+		    e->frames, live_syncs, live_reads_target, live_reads_shown, live_reads_other, gpu_refills);
 	}
 	fl_app = fl_order = fl_mirror = fl_mip = fl_fetch = 0;
 	live_syncs = live_reads_target = live_reads_shown = live_reads_other = 0;
@@ -5121,6 +5167,7 @@ install(void)
 		order_mesa_textures = strstr(arguments, "glorder=1") == NULL;   /* lavender: 2 by default (fewer flushes: each makes and frees a whole Mesa batch); glorder=1: as before */
 		cubic_on = strstr(arguments, "glcubic=0") == NULL;
 		no_flush_sync = strstr(arguments, "glfsync=0") != NULL;
+		gpu_refill_on = strstr(arguments, "glgpurefill=0") == NULL;
 		no_noise = strstr(arguments, "glnonoise=1") != NULL;
 		tex_barrier_on = strstr(arguments, "gltexbar=0") == NULL;
 		box_inner = strstr(arguments, "glbox=4") != NULL;
