@@ -84,3 +84,16 @@
  
     if (fencep && !batch) {
        batch = fd_context_batch(ctx);
+--- a/src/gallium/drivers/freedreno/freedreno_batch.c
++++ b/src/gallium/drivers/freedreno/freedreno_batch.c
+@@ -450,6 +450,10 @@
+    assert(batch->ctx == dep->ctx);
+ 
+    if (fd_batch_has_dep(batch, dep))
++      return;
++
++   /* lavender: what went out already need not go out first */
++   if (dep->flushed)
+       return;
+ 
+    /* a loop should not be possible */
