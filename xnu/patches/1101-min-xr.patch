@@ -1,0 +1,174 @@
+lavender-minimal 1101: XR (828x1792 @2x) on the first lavender kernel's copy path - frames are copied
+into the boot framebuffer at 828x1792 (stride 3328) and the source pipe VIG0 that ABL left scanning
+it fetches that size; its QSEED3 scales to the 1080x2340 panel (rewritten from 0995/1028/1031 without
+the MDP flip, GPU pool or direct-present changes). Touches over the whole panel. boot-arg
+sweetfb_xr=1 or sweetfb_scale2=2; ADT mkadt_lavender.py --xr --scale2.
+
+diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp	2026-11-23 13:36:30.865308599 +0000
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp	2026-11-23 13:36:30.945196984 +0000
+@@ -167,6 +167,9 @@
+ 	uint32_t      fWidth, fHeight, fRowBytes;
+ 	uint32_t      fLogicalW, fLogicalH;     /* size reported to userland */
+ 	int32_t       fOffX, fOffY;             /* logical origin of the panel */
++	bool          fXr, fXrOn;               /* lavender-minimal: 828x1792 drawn, VIG0's QSEED3 scales it (sweetfb_xr) */
++	volatile uint32_t *fXrVig, *fXrCtl;     /* ... VIG0 (mdp+0x5000) and CTL0 (mdp+0x2000) */
++	void          xrEnable(void);
+ 	uintptr_t     fPixels;          /* kernel mapping of the panel memory */
+ 	IOMemoryMap  *fMap;
+ 	SweetSurface *fSurface;         /* the panel memory as an IOSurface */
+@@ -320,9 +323,9 @@
+ 		return false;
+ 	}
+ 	*va = (const uint8_t *)fb->fPixels;
+-	*stride = fb->fRowBytes;
+-	*w = fb->fWidth;
+-	*h = fb->fHeight;
++	*stride = fb->fXrOn ? fb->fLogicalW * 4 : fb->fRowBytes;
++	*w = fb->fXrOn ? fb->fLogicalW : fb->fWidth;
++	*h = fb->fXrOn ? fb->fLogicalH : fb->fHeight;
+ 	return true;
+ }
+ 
+@@ -358,6 +361,32 @@
+ 	/* x rounded down to 4 pixels: the panel window must start 16-byte aligned (MDP fetch) */
+ 	fOffX = ((int32_t)(fLogicalW - fWidth) / 2) & ~3;
+ 	fOffY = (int32_t)(fLogicalH - fHeight) / 2;
++	{
++		/*
++		 * lavender-minimal: boot-arg sweetfb_xr=1 (or sweetfb_scale2=2) - iOS draws the iPhone XR's
++		 * 828x1792 (414x896 points @2x; ADT display-scale 2, canvas 828x1792): every frame is copied
++		 * into the boot framebuffer at that size (stride 3328) and the source pipe VIG0 that ABL left
++		 * scanning it fetches 828x1792 and its QSEED3 scales that to the 1080x2340 panel. Single
++		 * buffered, no MDP flip: only the registers of the pipe ABL set up.
++		 */
++		int xr = 0, scale2 = 0;
++		PE_parse_boot_argn("sweetfb_xr", &xr, sizeof(xr));
++		PE_parse_boot_argn("sweetfb_scale2", &scale2, sizeof(scale2));
++		if (xr != 0 || scale2 == 2) {
++			fXrVig = (volatile uint32_t *)ml_io_map(0x0c905000, 0x1000);
++			fXrCtl = (volatile uint32_t *)ml_io_map(0x0c902000, 0x1000);
++			if (fXrVig != NULL && fXrCtl != NULL && fXrVig[0x14 / 4] == (uint32_t)fPhys &&
++			    (uint64_t)fRowBytes * fHeight >= 828ull * 4 * 1792) {
++				fXr = true;
++				fLogicalW = 828;
++				fLogicalH = 1792;
++				fOffX = fOffY = 0;
++			} else {
++				IOLog("SWEET FB: XR: VIG0 scans %#x, not the boot framebuffer %#llx: left alone\n",
++				    fXrVig != NULL ? fXrVig[0x14 / 4] : 0, fPhys);
++			}
++		}
++	}
+ 	fLock = IOLockAlloc();
+ 	fClients = OSArray::withCapacity(4);
+ 	fSurface = sweet_surface_create_physical(fPhys, fWidth, fHeight, fRowBytes, SWEET_FB_FORMAT_BGRA);
+@@ -1370,7 +1399,12 @@
+ 	 * flip, like the direct path. Composing into the scanned, uncached boot
+ 	 * framebuffer showed every multi-layer frame (dims, apps) drawn top-down.
+ 	 */
+-	uint8_t *dst = fFlip[0] != NULL ? backBuffer() : (uint8_t *)fPixels;
++	uint8_t *dst = fFlip[0] != NULL && !fXr ? backBuffer() : (uint8_t *)fPixels;
++	/* lavender-minimal (sweetfb_xr): the picture is 828x1792 at stride 3328 in the boot framebuffer */
++	const uint32_t dW = fXr ? fLogicalW : fWidth, dH = fXr ? fLogicalH : fHeight, dStride = fXr ? fLogicalW * 4 : fRowBytes;
++	if (fXr && !fXrOn) {
++		xrEnable();
++	}
+ 	if (fFlip[0] == NULL && fVig0 != NULL && fScanPhys != fBootSrc) {
+ 		scanFrom(fBootSrc, fBootStride);
+ 	}
+@@ -1441,11 +1475,11 @@
+ 		if (h > (int32_t)s->height - sy) {
+ 			h = (int32_t)s->height - sy;
+ 		}
+-		if (w > (int32_t)fWidth - dx) {
+-			w = (int32_t)fWidth - dx;
++		if (w > (int32_t)dW - dx) {
++			w = (int32_t)dW - dx;
+ 		}
+-		if (h > (int32_t)fHeight - dy) {
+-			h = (int32_t)fHeight - dy;
++		if (h > (int32_t)dH - dy) {
++			h = (int32_t)dH - dy;
+ 		}
+ 		uint64_t last = (uint64_t)s->offset + (uint64_t)(sy + h - 1) * s->bytesPerRow +
+ 		    (uint64_t)(sx + w) * 4;
+@@ -1455,18 +1489,57 @@
+ 		}
+ 		if (src != 0 && bpe == 4) {
+ 			for (int32_t y = 0; y < h; y++) {
+-				memcpy((void *)(dst + (uint64_t)(dy + y) * fRowBytes + (uint64_t)dx * 4),
++				memcpy((void *)(dst + (uint64_t)(dy + y) * dStride + (uint64_t)dx * 4),
+ 				    (const void *)(src + s->offset + (uint64_t)(sy + y) * s->bytesPerRow + (uint64_t)sx * 4),
+ 				    (size_t)w * 4);
+ 			}
+ 		}
+ 		s->release();
+ 	}
+-	if (fFlip[0] != NULL) {
++	if (fFlip[0] != NULL && !fXr) {
+ 		flipBack();
+ 	}
+ }
+ 
++/*
++ * lavender-minimal (sweetfb_xr): VIG0 fetches 828x1792 at stride 3328 from the boot framebuffer
++ * and QSEED3 (VIG0 + 0xa00, bilinear, no LUT; mdss_mdp_qseed3_setup in Xiaomi's lavender
++ * kernel) makes 1080x2340 of it; CTL0 FLUSH latches VIG0 + CTL at the next vsync.
++ */
++void
++AppleCLCD::xrEnable(void)
++{
++	const uint32_t sw = fLogicalW, sh = fLogicalH;
++	volatile uint32_t *sc = fXrVig + 0xa00 / 4;
++
++	bzero((void *)fPixels, (size_t)sw * 4 * sh);
++	fXrVig[0x00 / 4] = (sh << 16) | sw;             /* SSPP_SRC_SIZE */
++	fXrVig[0x04 / 4] = (sh << 16) | sw;             /* SSPP_SRC_IMG_SIZE */
++	fXrVig[0x08 / 4] = 0;                           /* SSPP_SRC_XY */
++	fXrVig[0x24 / 4] = sw * 4;                      /* SSPP_SRC_YSTRIDE0 */
++	for (uint32_t off = 0; off <= 32; off += 16) {  /* SW pixel extension, planes 0, 1/2, 3 */
++		fXrVig[(0x100 + off) / 4] = 0;
++		fXrVig[(0x104 + off) / 4] = 0;
++		fXrVig[(0x108 + off) / 4] = (sh << 16) | sw;
++	}
++	uint32_t stepx = (uint32_t)(((uint64_t)sw << 21) / fWidth), stepy = (uint32_t)(((uint64_t)sh << 21) / fHeight);
++	sc[0x0c / 4] = 0;                               /* PHASE_INIT */
++	sc[0x10 / 4] = stepx;                           /* PHASE_STEP_Y_H */
++	sc[0x14 / 4] = stepy;                           /* PHASE_STEP_Y_V */
++	sc[0x18 / 4] = stepx;                           /* PHASE_STEP_UV_H */
++	sc[0x1c / 4] = stepy;                           /* PHASE_STEP_UV_V */
++	sc[0x20 / 4] = 0x03040304;                      /* PRELOAD: 4 across, 3 down */
++	sc[0x40 / 4] = (sh << 16) | sw;                 /* SRC_SIZE_Y_RGB_A */
++	sc[0x44 / 4] = (sh << 16) | sw;                 /* SRC_SIZE_UV */
++	sc[0x48 / 4] = (fHeight << 16) | fWidth;        /* DST_SIZE */
++	sc[0x04 / 4] = 1u | (1u << 14) | (3u << 16) | (3u << 24) | (1u << 31);  /* OP_MODE: on, 8-bit, bilinear */
++	__asm__ volatile("dsb sy" ::: "memory");
++	fXrCtl[0x18 / 4] = 0x20001;                     /* CTL0 FLUSH: VIG0 + CTL */
++	__asm__ volatile("dsb sy" ::: "memory");
++	fXrOn = true;
++	IOLog("SWEET FB: XR: VIG0 QSEED3 (version %#x) scales %ux%u to %ux%u\n", sc[0], sw, sh, fWidth, fHeight);
++}
++
+ bool
+ IOMobileFramebufferUserClient::initWithTask(task_t owningTask, void *securityID, UInt32 type)
+ {
+diff --git a/iokit/Kernel/arm/hid/SweetHID.cpp b/iokit/Kernel/arm/hid/SweetHID.cpp
+--- a/iokit/Kernel/arm/hid/SweetHID.cpp	2026-11-23 13:36:30.866991981 +0000
++++ b/iokit/Kernel/arm/hid/SweetHID.cpp	2026-11-23 13:36:30.945460614 +0000
+@@ -434,6 +434,15 @@
+ 	}
+ 	int native = 0;
+ 	PE_parse_boot_argn("sweetfb_native", &native, sizeof(native));
++	{
++		/* lavender-minimal: XR (sweetfb_xr / sweetfb_scale2=2) - the scaled picture covers the whole panel */
++		int xr = 0, scale2 = 0;
++		PE_parse_boot_argn("sweetfb_xr", &xr, sizeof(xr));
++		PE_parse_boot_argn("sweetfb_scale2", &scale2, sizeof(scale2));
++		if (xr != 0 || scale2 == 2) {
++			native = 1;
++		}
++	}
+ 	fLogicalW = native ? 1080 : 1125;
+ 	fLogicalH = native ? 2400 : 2436;
+ 	fOffX = ((fLogicalW - 1080) / 2) & ~3;           /* as SweetFramebuffer.cpp */
