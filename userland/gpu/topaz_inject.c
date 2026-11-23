@@ -481,6 +481,38 @@ topaz_inject(void)
 	 * after a day of forced restarts, Photos stayed black): /var/mobile/Media/PhotoData is renamed
 	 * PhotoData.bak-SECONDS, nothing is deleted; assetsd makes a new one.
 	 */
+	/*
+	 * lavender: boot-arg lv_tccreset=1: the privacy database aside (assetsd: "requires
+	 * TCCPhotosService access" on every start, Photos black): TCC.db (and its -wal/-shm) renamed
+	 * .bak-SECONDS; tccd makes a new one. lv_photorestore=NAME: PhotoData.bak-NAME back in place.
+	 */
+	if (strstr(args, "lv_tccreset=1") != NULL) {
+		const char *parts[] = { "", "-wal", "-shm" };
+		long now = (long)time(NULL);
+		for (int i = 0; i < 3; i++) {
+			char from[96], to[112];
+			snprintf(from, sizeof(from), "/var/mobile/Library/TCC/TCC.db%s", parts[i]);
+			snprintf(to, sizeof(to), "%s.bak-%ld", from, now);
+			if (access(from, F_OK) == 0) {
+				int r = rename(from, to);
+				fprintf(stderr, "topaz-inject: %s -> %s: %s\n", from, to, r == 0 ? "done" : strerror(errno));
+			}
+		}
+	}
+	const char *restore = strstr(args, "lv_photorestore=");
+	if (restore != NULL) {
+		char from[96], to[96];
+		size_t n = strcspn(restore + 16, " ");
+		snprintf(from, sizeof(from), "/var/mobile/Media/PhotoData.bak-%.*s", (int)(n < 20 ? n : 20), restore + 16);
+		if (access(from, F_OK) == 0) {
+			snprintf(to, sizeof(to), "/var/mobile/Media/PhotoData.new-%ld", (long)time(NULL));
+			if (access("/var/mobile/Media/PhotoData", F_OK) == 0) {
+				rename("/var/mobile/Media/PhotoData", to);
+			}
+			int r = rename(from, "/var/mobile/Media/PhotoData");
+			fprintf(stderr, "topaz-inject: photo library %s back in place: %s\n", from, r == 0 ? "done" : strerror(errno));
+		}
+	}
 	if (strstr(args, "lv_photoreset=1") != NULL && access("/var/mobile/Media/PhotoData", F_OK) == 0) {
 		char to[96];
 		snprintf(to, sizeof(to), "/var/mobile/Media/PhotoData.bak-%ld", (long)time(NULL));
