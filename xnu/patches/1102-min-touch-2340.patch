@@ -1,0 +1,45 @@
+lavender-minimal 1102: touches on the 1080x2340 lavender panel (the first kernel still had topaz's
+2400 rows: the bottom edge, where the unlock and home gestures start, was out of reach). From 0998,
+without its sweetfb_offy part.
+
+diff --git a/iokit/Kernel/arm/hid/SweetHID.cpp b/iokit/Kernel/arm/hid/SweetHID.cpp
+--- a/iokit/Kernel/arm/hid/SweetHID.cpp	2026-11-23 14:47:17.668773712 +0000
++++ b/iokit/Kernel/arm/hid/SweetHID.cpp	2026-11-23 14:47:17.679787466 +0000
+@@ -356,6 +356,7 @@
+  * app-switcher gesture.
+  */
+ #define SWEET_TOUCH_EDGE_PX 48
++#define SWEET_PANEL_H 2340        /* lavender-minimal: the lavender panel is 1080x2340 (topaz: 2400) - the bottom edge, where the unlock and home gestures start, was out of reach */
+ class SweetHIDTouch : public IOHIDEventService {
+ 	OSDeclareDefaultStructors(SweetHIDTouch);
+ public:
+@@ -444,9 +445,9 @@
+ 		}
+ 	}
+ 	fLogicalW = native ? 1080 : 1125;
+-	fLogicalH = native ? 2400 : 2436;
++	fLogicalH = native ? SWEET_PANEL_H : 2436;
+ 	fOffX = ((fLogicalW - 1080) / 2) & ~3;           /* as SweetFramebuffer.cpp */
+-	fOffY = (fLogicalH - 2400) / 2;
++	fOffY = (fLogicalH - SWEET_PANEL_H) / 2;
+ 	/* The digitizer covers the main display (backboardd maps it 1:1). */
+ 	setProperty("DisplayIntegrated", kOSBooleanTrue);
+ 	setProperty("SurfaceWidth", (unsigned long long)(68 << 16), 32);	/* mm, 16.16 */
+@@ -468,7 +469,7 @@
+ 		return;
+ 	}
+ 	x = x < 0 ? 0 : (x > 1079 ? 1079 : x);
+-	y = y < 0 ? 0 : (y > 2399 ? 2399 : y);
++	y = y < 0 ? 0 : (y > SWEET_PANEL_H - 1 ? SWEET_PANEL_H - 1 : y);
+ 
+ 	IOLockLock(fLock);
+ 	bool was = fDown[finger];
+@@ -482,7 +483,7 @@
+ 	}
+ 	if (!was && down) {
+ 		fEdge[finger] = x < SWEET_TOUCH_EDGE_PX || x > 1079 - SWEET_TOUCH_EDGE_PX ||
+-		    y < SWEET_TOUCH_EDGE_PX || y > 2399 - SWEET_TOUCH_EDGE_PX;
++		    y < SWEET_TOUCH_EDGE_PX || y > SWEET_PANEL_H - 1 - SWEET_TOUCH_EDGE_PX;
+ 	}
+ 
+ 	collection = IOHIDEvent::digitizerEvent(now, 0, kIOHIDDigitizerTransducerTypeHand, false, 0, 0, 0);
