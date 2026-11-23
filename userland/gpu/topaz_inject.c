@@ -420,6 +420,37 @@ exc_thrown(id exception)
 	return exception;
 }
 
+/*
+ * lavender: CoreImage in an application makes an OpenGL ES context of Apple's (there is no Metal):
+ * with no GPU driver of Apple's it calls through a null function pointer (Messages: icon
+ * compositor, sig 11 at pc 0 in CI::GLContext::init). Every CIContext is made for the CPU
+ * renderer instead (kCIContextUseSoftwareRenderer = "software_renderer").
+ */
+static id (*ci_init_orig)(id, SEL, CFDictionaryRef);
+static id
+ci_init_software(id self, SEL cmd, CFDictionaryRef options)
+{
+	CFMutableDictionaryRef mine = options != NULL ? CFDictionaryCreateMutableCopy(NULL, 0, options) :
+	    CFDictionaryCreateMutable(NULL, 0, &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+	CFDictionarySetValue(mine, CFSTR("software_renderer"), kCFBooleanTrue);
+	id r = ci_init_orig(self, cmd, mine);
+	CFRelease(mine);
+	return r;
+}
+
+static void
+ci_software_fix(void)
+{
+	dlopen("/System/Library/Frameworks/CoreImage.framework/CoreImage", RTLD_NOW);
+	Class ci = objc_getClass("CIContext");
+	Method m = ci ? class_getInstanceMethod(ci, sel_registerName("initWithOptions:")) : NULL;
+	if (m != NULL) {
+		ci_init_orig = (id (*)(id, SEL, CFDictionaryRef))method_getImplementation(m);
+		method_setImplementation(m, (IMP)ci_init_software);
+	}
+	fprintf(stderr, "topaz-exc: %s: CIContext %s\n", getprogname(), m ? "on the CPU" : "not found");
+}
+
 /* lavender: PLPrivacy's answer for the photo library's own daemon: allowed (see below) */
 static long
 photos_allowed(id self, SEL cmd, long scope)
@@ -527,6 +558,7 @@ topaz_inject(void)
 		 * black. The daemon of the photo library is allowed its own library.
 		 */
 		entitlements_self_check();
+		ci_software_fix();
 		if (strcmp(name, "assetsd") == 0 || strcmp(name, "AegirPoster") == 0 || strcmp(name, "MobileSlideShow") == 0) {
 			photos_privacy_fix();
 		}
