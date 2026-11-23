@@ -544,6 +544,10 @@ topaz_inject(void)
 		return;
 	}
 	if (name != NULL && strcmp(name, "backboardd") != 0 && strcmp(name, "SpringBoard") != 0) {
+		if (sysctlbyname("kern.bootargs", args, &size, NULL, 0) != 0) {
+			args[0] = 0;
+		}
+		size = sizeof(args) - 1;
 		int console = open("/dev/console", O_WRONLY);     /* (launchd gives these daemons no stderr) */
 		if (console >= 0) {
 			dup2(console, 2);
@@ -558,7 +562,19 @@ topaz_inject(void)
 		 * black. The daemon of the photo library is allowed its own library.
 		 */
 		entitlements_self_check();
-		ci_software_fix();
+		/*
+		 * lavender: OpenGL ES for applications (CoreImage has no CPU path on iOS 17 and makes
+		 * an EAGLContext: Apple's has no driver here) - libtopaz-gl's EAGLContext on Mesa's
+		 * softpipe: the CPU, no GPU access needed in the application's sandbox. boot-arg
+		 * appgl=0: not.
+		 */
+		if (strstr(args, "appgl=0") == NULL && access(TOPAZ_GL, R_OK) == 0) {
+			setenv("GALLIUM_DRIVER", "softpipe", 1);
+			void *gl = dlopen(TOPAZ_GL, RTLD_NOW);
+			fprintf(stderr, "topaz-exc: %s: OpenGL ES on softpipe %s\n", name, gl ? "loaded" : dlerror());
+		} else {
+			ci_software_fix();
+		}
 		if (strcmp(name, "assetsd") == 0 || strcmp(name, "AegirPoster") == 0 || strcmp(name, "MobileSlideShow") == 0) {
 			photos_privacy_fix();
 		}
