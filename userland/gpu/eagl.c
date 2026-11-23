@@ -5165,6 +5165,27 @@ display_waits(void)
 	return waits;
 }
 
+/*
+ * lavender: -[EAGLContext sharegroup] of Apple's reads the context's private part, which a context
+ * of ours does not have (CoreImage asks for it: Messages crashed at address 8). One sharegroup
+ * object for every context of ours (the library shares nothing between them anyway).
+ */
+static id
+my_sharegroup(id self, SEL cmd)
+{
+	static id group;
+
+	(void)self;
+	(void)cmd;
+	if (group == NULL) {
+		Class c = objc_getClass("EAGLSharegroup");
+		id (*alloc)(Class, SEL) = (id (*)(Class, SEL))objc_msgSend;
+		id (*init)(id, SEL) = (id (*)(id, SEL))objc_msgSend;
+		group = c ? init(alloc(c, sel_registerName("alloc")), sel_registerName("init")) : NULL;
+	}
+	return group;
+}
+
 __attribute__((constructor)) static void
 install(void)
 {
@@ -5179,6 +5200,7 @@ install(void)
 		{ "texImageIOSurface:target:internalFormat:width:height:format:type:plane:invert:", (IMP)my_texImageIOSurface },
 		{ "attachImage:toCoreSurface:invertedRender:", (IMP)my_attachImage },
 		{ "dealloc", (IMP)my_dealloc },
+		{ "sharegroup", (IMP)my_sharegroup },
 	};
 	Class class = objc_getClass("EAGLContext");
 	unsigned replaced = 0;
