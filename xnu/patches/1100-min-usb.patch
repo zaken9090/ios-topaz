@@ -2,6 +2,24 @@ lavender-minimal 1100: the USB channel only (WinUSB log, lv:put, lv:shot, lv:key
 lv:fastboot/reboot/poweroff) on the first lavender kernel - rewritten from 1016/1017 without the
 profiler, peek/poke, smp, psci and PON dump; lv:shot reads the splash the frames are copied into.
 
+diff --git a/bsd/dev/sweet_ufs.c b/bsd/dev/sweet_ufs.c
+--- a/bsd/dev/sweet_ufs.c	2026-11-23 14:08:45.105763109 +0000
++++ b/bsd/dev/sweet_ufs.c	2026-11-23 14:08:45.118820419 +0000
+@@ -967,6 +967,14 @@
+ 	/* lavender: touch is the lavender driver (Novatek on BLSP1 QUP1);
+ 	 * the topaz keys/USB drivers still poke SM6225 MMIO */
+ 	sweet_touch_init();
++	{
++		/* lavender-minimal: boot-arg lv_usb=1 - the USB channel (sweet_usb.c: DWC3 0xa800000, WinUSB) */
++		int lvusb = 0;
++		(void)PE_parse_boot_argn("lv_usb", &lvusb, sizeof(lvusb));
++		if (lvusb && hw != 1) {
++			sweet_usb_probe();
++		}
++	}
+ 	if (hw == 1) {
+ 		sweet_keys_init();
+ 		sweet_usb_probe();
 diff --git a/bsd/dev/sweet_usb.c b/bsd/dev/sweet_usb.c
 --- a/bsd/dev/sweet_usb.c	2026-11-23 13:33:32.337256073 +0000
 +++ b/bsd/dev/sweet_usb.c	2026-11-23 13:33:32.341985049 +0000
