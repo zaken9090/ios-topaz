@@ -26,6 +26,7 @@
 #include <time.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <arpa/inet.h>
 #include <mach-o/dyld.h>
 
 extern const void *_dyld_get_shared_cache_range(size_t *length);
@@ -427,6 +428,45 @@ photos_allowed(id self, SEL cmd, long scope)
 	return 0;
 }
 
+/* lavender: what this process can see of its own entitlements (the AMFI stand-in's answers) */
+static void
+entitlements_self_check(void)
+{
+	extern int csops(pid_t pid, unsigned int ops, void *useraddr, size_t usersize);
+	uint8_t buf[8192];
+	uint32_t flags = 0;
+	int r0 = csops(getpid(), 0, &flags, sizeof(flags));                 /* CS_OPS_STATUS */
+	memset(buf, 0, sizeof(buf));
+	int r7 = csops(getpid(), 7, buf, sizeof(buf));                      /* CS_OPS_ENTITLEMENTS_BLOB (XML) */
+	uint32_t xlen = r7 == 0 ? ntohl(*(uint32_t *)(buf + 4)) : 0;
+	int has_tcc_xml = r7 == 0 && memmem(buf, sizeof(buf), "com.apple.private.tcc.allow", 27) != NULL;
+	memset(buf, 0, sizeof(buf));
+	int r16 = csops(getpid(), 16, buf, sizeof(buf));                    /* CS_OPS_DER_ENTITLEMENTS_BLOB */
+	uint32_t dlen = r16 == 0 ? ntohl(*(uint32_t *)(buf + 4)) : 0;
+	int has_tcc_der = r16 == 0 && memmem(buf, sizeof(buf), "com.apple.private.tcc.allow", 27) != NULL;
+	fprintf(stderr, "topaz-ent: %s: csflags %#x (%d); XML entitlements %d len %u tcc %d; DER %d (errno %d) len %u tcc %d\n",
+	    getprogname(), flags, r0, r7, xlen, has_tcc_xml, r16, r16 ? errno : 0, dlen, has_tcc_der);
+
+	void *sec = dlopen("/System/Library/Frameworks/Security.framework/Security", RTLD_NOW);
+	void *(*task_self)(void *) = sec ? (void *(*)(void *))dlsym(sec, "SecTaskCreateFromSelf") : NULL;
+	void *(*task_value)(void *, CFStringRef, void *) = sec ? (void *(*)(void *, CFStringRef, void *))dlsym(sec, "SecTaskCopyValueForEntitlement") : NULL;
+	if (task_self != NULL && task_value != NULL) {
+		void *task = task_self(NULL);
+		CFTypeRef v = task ? task_value(task, CFSTR("com.apple.private.tcc.allow"), NULL) : NULL;
+		char text[200] = "none";
+		if (v != NULL) {
+			CFStringRef d = CFCopyDescription(v);
+			CFStringGetCString(d, text, sizeof(text), kCFStringEncodingUTF8);
+			CFRelease(d);
+			CFRelease(v);
+		}
+		fprintf(stderr, "topaz-ent: %s: SecTask com.apple.private.tcc.allow = %s\n", getprogname(), text);
+		if (task) {
+			CFRelease(task);
+		}
+	}
+}
+
 static void
 photos_privacy_fix(void)
 {
@@ -486,6 +526,7 @@ topaz_inject(void)
 		 * does not see its private TCC entitlement (the kernel's AMFI stand-in), so Photos stayed
 		 * black. The daemon of the photo library is allowed its own library.
 		 */
+		entitlements_self_check();
 		photos_privacy_fix();
 		fprintf(stderr, "topaz-exc: %s: uncaught exceptions are told\n", name);
 		return;
