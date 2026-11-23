@@ -19,6 +19,8 @@
 #include <execinfo.h>
 #include <sys/ucontext.h>
 #include <objc/runtime.h>
+#include <objc/message.h>
+#include <objc/objc-exception.h>
 #include <mach/mach.h>
 #include <stdint.h>
 #include <time.h>
@@ -405,6 +407,34 @@ sb_snapshot_hooks(void)
 	fprintf(stderr, "topaz-sbsnap: %zu snapshot functions hooked in %u images\n", n, _dyld_image_count());
 }
 
+static void exc_said(id exception);
+static int exc_count;
+static id
+exc_thrown(id exception)
+{
+	if (exc_count++ < 6) {
+		exc_said(exception);
+	}
+	return exception;
+}
+
+/* lavender: a daemon that dies of an uncaught exception (assetsd: Photos black) says why on stderr */
+static void
+exc_said(id exception)
+{
+	id (*send)(id, SEL) = (id (*)(id, SEL))objc_msgSend;
+	const char *(*utf8)(id, SEL) = (const char *(*)(id, SEL))objc_msgSend;
+	id name = send(exception, sel_registerName("name")), reason = send(exception, sel_registerName("reason"));
+	id stack = send(exception, sel_registerName("callStackSymbols"));
+	id text = stack != NULL ? send(stack, sel_registerName("description")) : NULL;
+
+	fprintf(stderr, "topaz-exc: %s[%d]: %s: %s\n", getprogname(), getpid(), name ? utf8(name, sel_registerName("UTF8String")) : "?",
+	    reason ? utf8(reason, sel_registerName("UTF8String")) : "?");
+	if (text != NULL) {
+		fprintf(stderr, "topaz-exc: %s\n", utf8(text, sel_registerName("UTF8String")));
+	}
+}
+
 __attribute__((constructor))
 static void
 topaz_inject(void)
@@ -417,6 +447,12 @@ topaz_inject(void)
 
 	if (name != NULL && strncmp(name, "containermanagerd", 17) == 0) {
 		container_manager_fixes();
+		return;
+	}
+	if (name != NULL && (strcmp(name, "assetsd") == 0 || strcmp(name, "AegirPoster") == 0)) {
+		objc_setUncaughtExceptionHandler((objc_uncaught_exception_handler)exc_said);
+		objc_setExceptionPreprocessor((objc_exception_preprocessor)exc_thrown);     /* (CoreFoundation replaces the handler) */
+		fprintf(stderr, "topaz-exc: %s: uncaught exceptions are told\n", name);
 		return;
 	}
 	if (name != NULL && strcmp(name, "SpringBoard") == 0) {
