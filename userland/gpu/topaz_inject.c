@@ -21,6 +21,7 @@
 #include <objc/runtime.h>
 #include <mach/mach.h>
 #include <stdint.h>
+#include <mach-o/dyld.h>
 
 extern const void *_dyld_get_shared_cache_range(size_t *length);
 
@@ -208,6 +209,200 @@ container_manager_fixes(void)
 	}
 }
 
+/*
+ * lavender: boot-arg sbsnap=1 (with SpringBoard in topaz_inject's list): what SpringBoard does
+ * with the snapshots of apps (the cards of the app switcher, the card of an app being closed come
+ * out black on the GPU path, right with gl=0): every call of the snapshot functions of
+ * QuartzCore, IOSurfaceAccelerator and vImage is written down with what the pictures hold.
+ */
+struct sb_vbuf { void *data; uintptr_t height, width, row; };
+struct sb_interpose { const void *replacement, *replacee; };
+static void (*sb_dyn_interpose)(const void *header, const struct sb_interpose *array, size_t count);
+static uint32_t (*sb_surface_id)(void *);
+static size_t (*sb_surface_w)(void *), (*sb_surface_h)(void *), (*sb_surface_row)(void *);
+static uint32_t (*sb_surface_fmt)(void *);
+static int (*sb_surface_lock)(void *, uint32_t, uint32_t *), (*sb_surface_unlock)(void *, uint32_t, uint32_t *);
+static void *(*sb_surface_base)(void *);
+
+static void
+sb_look(const char *what, const uint8_t *base, size_t w, size_t h, size_t row, unsigned bpp)
+{
+	unsigned lit = 0, n = 0;
+	uint32_t mid = 0;
+
+	if (base == NULL || w == 0 || h == 0) {
+		fprintf(stderr, "topaz-sbsnap: %s: no pixels\n", what);
+		return;
+	}
+	for (size_t y = h / 16; y < h; y += h / 8 + 1) {
+		for (size_t x = w / 16; x < w; x += w / 8 + 1) {
+			const uint8_t *px = base + y * row + x * bpp;
+			n++;
+			lit += bpp >= 3 ? (px[0] | px[1] | px[2]) != 0 : px[0] != 0;
+		}
+	}
+	memcpy(&mid, base + (h / 2) * row + (w / 2) * bpp, bpp < 4 ? bpp : 4);
+	fprintf(stderr, "topaz-sbsnap: %s: %zux%zu row %zu: middle %08x, %u of %u samples not black\n", what, w, h, row, mid, lit, n);
+}
+
+static void
+sb_surface(const char *what, void *surface)
+{
+	char label[160];
+
+	if (surface == NULL || sb_surface_id == NULL) {
+		fprintf(stderr, "topaz-sbsnap: %s: surface NULL\n", what);
+		return;
+	}
+	uint32_t fmt = sb_surface_fmt(surface);
+	snprintf(label, sizeof(label), "%s surface %u fmt %08x", what, sb_surface_id(surface), fmt);
+	if (sb_surface_lock(surface, 1, NULL) == 0) {
+		sb_look(label, sb_surface_base(surface), sb_surface_w(surface), sb_surface_h(surface), sb_surface_row(surface),
+		    fmt == 0x42475241 || fmt == 0x52474241 ? 4 : 1);
+		sb_surface_unlock(surface, 1, NULL);
+	} else {
+		fprintf(stderr, "topaz-sbsnap: %s: cannot be locked\n", label);
+	}
+}
+
+typedef uintptr_t (*sb_fn8)(uintptr_t, uintptr_t, uintptr_t, uintptr_t, uintptr_t, uintptr_t, uintptr_t, uintptr_t);
+static sb_fn8 sb_o_render_display, sb_o_capture_display, sb_o_capture_display_t, sb_o_capture_layer, sb_o_capture_layer_t,
+    sb_o_capture_layer_to, sb_o_accel_create, sb_o_accel_transfer, sb_o_vscale, sb_o_vconv420;
+
+static uintptr_t
+sb_render_display(uintptr_t a, uintptr_t b, uintptr_t c, uintptr_t d, uintptr_t e, uintptr_t f, uintptr_t g, uintptr_t h)
+{
+	uintptr_t r = sb_o_render_display(a, b, c, d, e, f, g, h);
+	fprintf(stderr, "topaz-sbsnap: CARenderServerRenderDisplay -> %#lx\n", (unsigned long)r);
+	sb_surface("  into", (void *)c);
+	return r;
+}
+
+static uintptr_t
+sb_captured(const char *name, uintptr_t r)
+{
+	fprintf(stderr, "topaz-sbsnap: %s -> %#lx\n", name, (unsigned long)r);
+	sb_surface("  captured", (void *)r);
+	return r;
+}
+static uintptr_t
+sb_capture_display(uintptr_t a, uintptr_t b, uintptr_t c, uintptr_t d, uintptr_t e, uintptr_t f, uintptr_t g, uintptr_t h)
+{
+	return sb_captured("CARenderServerCaptureDisplay", sb_o_capture_display(a, b, c, d, e, f, g, h));
+}
+static uintptr_t
+sb_capture_display_t(uintptr_t a, uintptr_t b, uintptr_t c, uintptr_t d, uintptr_t e, uintptr_t f, uintptr_t g, uintptr_t h)
+{
+	return sb_captured("CARenderServerCaptureDisplayWithTransform", sb_o_capture_display_t(a, b, c, d, e, f, g, h));
+}
+static uintptr_t
+sb_capture_layer(uintptr_t a, uintptr_t b, uintptr_t c, uintptr_t d, uintptr_t e, uintptr_t f, uintptr_t g, uintptr_t h)
+{
+	return sb_captured("CARenderServerCaptureLayer", sb_o_capture_layer(a, b, c, d, e, f, g, h));
+}
+static uintptr_t
+sb_capture_layer_t(uintptr_t a, uintptr_t b, uintptr_t c, uintptr_t d, uintptr_t e, uintptr_t f, uintptr_t g, uintptr_t h)
+{
+	return sb_captured("CARenderServerCaptureLayerWithTransform", sb_o_capture_layer_t(a, b, c, d, e, f, g, h));
+}
+static uintptr_t
+sb_capture_layer_to(uintptr_t a, uintptr_t b, uintptr_t c, uintptr_t d, uintptr_t e, uintptr_t f, uintptr_t g, uintptr_t h)
+{
+	return sb_captured("CARenderServerCaptureLayerWithTransformAndTimeOffset", sb_o_capture_layer_to(a, b, c, d, e, f, g, h));
+}
+
+static uintptr_t
+sb_accel_create(uintptr_t a, uintptr_t b, uintptr_t c, uintptr_t d, uintptr_t e, uintptr_t f, uintptr_t g, uintptr_t h)
+{
+	uintptr_t r = sb_o_accel_create(a, b, c, d, e, f, g, h);
+	fprintf(stderr, "topaz-sbsnap: IOSurfaceAcceleratorCreate -> %#lx\n", (unsigned long)r);
+	return r;
+}
+static uintptr_t
+sb_accel_transfer(uintptr_t a, uintptr_t b, uintptr_t c, uintptr_t d, uintptr_t e, uintptr_t f, uintptr_t g, uintptr_t h)
+{
+	sb_surface("IOSurfaceAcceleratorTransferSurface from", (void *)b);
+	uintptr_t r = sb_o_accel_transfer(a, b, c, d, e, f, g, h);
+	fprintf(stderr, "topaz-sbsnap: IOSurfaceAcceleratorTransferSurface -> %#lx\n", (unsigned long)r);
+	sb_surface("  to", (void *)c);
+	return r;
+}
+static uintptr_t
+sb_vscale(uintptr_t a, uintptr_t b, uintptr_t c, uintptr_t d, uintptr_t e, uintptr_t f, uintptr_t g, uintptr_t h)
+{
+	const struct sb_vbuf *src = (const struct sb_vbuf *)a, *dst = (const struct sb_vbuf *)b;
+	if (src != NULL) {
+		sb_look("vImageScale_ARGB8888 from", src->data, src->width, src->height, src->row, 4);
+	}
+	uintptr_t r = sb_o_vscale(a, b, c, d, e, f, g, h);
+	if (dst != NULL) {
+		sb_look("  to", dst->data, dst->width, dst->height, dst->row, 4);
+	}
+	return r;
+}
+static uintptr_t
+sb_vconv420(uintptr_t a, uintptr_t b, uintptr_t c, uintptr_t d, uintptr_t e, uintptr_t f, uintptr_t g, uintptr_t h)
+{
+	const struct sb_vbuf *src = (const struct sb_vbuf *)a;
+	if (src != NULL) {
+		sb_look("vImageConvert_ARGB8888To420Yp8_CbCr8 from", src->data, src->width, src->height, src->row, 4);
+	}
+	return sb_o_vconv420(a, b, c, d, e, f, g, h);
+}
+
+static void
+sb_snapshot_hooks(void)
+{
+	struct { const char *name; void *mine; sb_fn8 *orig; } hooks[] = {
+		{ "CARenderServerRenderDisplay", (void *)sb_render_display, &sb_o_render_display },
+		{ "CARenderServerCaptureDisplay", (void *)sb_capture_display, &sb_o_capture_display },
+		{ "CARenderServerCaptureDisplayWithTransform", (void *)sb_capture_display_t, &sb_o_capture_display_t },
+		{ "CARenderServerCaptureLayer", (void *)sb_capture_layer, &sb_o_capture_layer },
+		{ "CARenderServerCaptureLayerWithTransform", (void *)sb_capture_layer_t, &sb_o_capture_layer_t },
+		{ "CARenderServerCaptureLayerWithTransformAndTimeOffset", (void *)sb_capture_layer_to, &sb_o_capture_layer_to },
+		{ "IOSurfaceAcceleratorCreate", (void *)sb_accel_create, &sb_o_accel_create },
+		{ "IOSurfaceAcceleratorTransferSurface", (void *)sb_accel_transfer, &sb_o_accel_transfer },
+		{ "vImageScale_ARGB8888", (void *)sb_vscale, &sb_o_vscale },
+		{ "vImageConvert_ARGB8888To420Yp8_CbCr8", (void *)sb_vconv420, &sb_o_vconv420 },
+	};
+	struct sb_interpose tuples[16];
+	size_t n = 0;
+
+	dlopen("/System/Library/PrivateFrameworks/IOSurfaceAccelerator.framework/IOSurfaceAccelerator", RTLD_NOW);
+	dlopen("/System/Library/Frameworks/Accelerate.framework/Accelerate", RTLD_NOW);
+	dlopen("/System/Library/Frameworks/IOSurface.framework/IOSurface", RTLD_NOW);
+	dlopen("/System/Library/Frameworks/QuartzCore.framework/QuartzCore", RTLD_NOW);
+	sb_dyn_interpose = (void (*)(const void *, const struct sb_interpose *, size_t))dlsym(RTLD_DEFAULT, "dyld_dynamic_interpose");
+	sb_surface_id = (uint32_t (*)(void *))dlsym(RTLD_DEFAULT, "IOSurfaceGetID");
+	sb_surface_w = (size_t (*)(void *))dlsym(RTLD_DEFAULT, "IOSurfaceGetWidth");
+	sb_surface_h = (size_t (*)(void *))dlsym(RTLD_DEFAULT, "IOSurfaceGetHeight");
+	sb_surface_row = (size_t (*)(void *))dlsym(RTLD_DEFAULT, "IOSurfaceGetBytesPerRow");
+	sb_surface_fmt = (uint32_t (*)(void *))dlsym(RTLD_DEFAULT, "IOSurfaceGetPixelFormat");
+	sb_surface_lock = (int (*)(void *, uint32_t, uint32_t *))dlsym(RTLD_DEFAULT, "IOSurfaceLock");
+	sb_surface_unlock = (int (*)(void *, uint32_t, uint32_t *))dlsym(RTLD_DEFAULT, "IOSurfaceUnlock");
+	sb_surface_base = (void *(*)(void *))dlsym(RTLD_DEFAULT, "IOSurfaceGetBaseAddress");
+	for (size_t i = 0; i < sizeof(hooks) / sizeof(hooks[0]); i++) {
+		void *at = dlsym(RTLD_DEFAULT, hooks[i].name);
+		if (at != NULL) {
+			*hooks[i].orig = (sb_fn8)at;
+			tuples[n].replacement = hooks[i].mine;
+			tuples[n].replacee = at;
+			n++;
+		} else {
+			fprintf(stderr, "topaz-sbsnap: no %s\n", hooks[i].name);
+		}
+	}
+	if (sb_dyn_interpose == NULL || sb_surface_lock == NULL) {
+		fprintf(stderr, "topaz-sbsnap: no dyld_dynamic_interpose (%p) or IOSurface (%p): nothing hooked\n", (void *)sb_dyn_interpose,
+		    (void *)sb_surface_lock);
+		return;
+	}
+	for (uint32_t i = 0; i < _dyld_image_count(); i++) {
+		sb_dyn_interpose(_dyld_get_image_header(i), tuples, n);
+	}
+	fprintf(stderr, "topaz-sbsnap: %zu snapshot functions hooked in %u images\n", n, _dyld_image_count());
+}
+
 __attribute__((constructor))
 static void
 topaz_inject(void)
@@ -220,6 +415,15 @@ topaz_inject(void)
 
 	if (name != NULL && strncmp(name, "containermanagerd", 17) == 0) {
 		container_manager_fixes();
+		return;
+	}
+	if (name != NULL && strcmp(name, "SpringBoard") == 0) {
+		char sargs[1024] = "";
+		size_t ssize = sizeof(sargs) - 1;
+
+		if (sysctlbyname("kern.bootargs", sargs, &ssize, NULL, 0) == 0 && strstr(sargs, "sbsnap=1") != NULL) {
+			sb_snapshot_hooks();
+		}
 		return;
 	}
 	if (name == NULL || strcmp(name, "backboardd") != 0 || access(TOPAZ_GL, R_OK) != 0) {
