@@ -419,6 +419,28 @@ exc_thrown(id exception)
 	return exception;
 }
 
+/* lavender: PLPrivacy's answer for the photo library's own daemon: allowed (see below) */
+static long
+photos_allowed(id self, SEL cmd, long scope)
+{
+	(void)self; (void)cmd; (void)scope;
+	return 0;
+}
+
+static void
+photos_privacy_fix(void)
+{
+	dlopen("/System/Library/PrivateFrameworks/PhotoLibraryServicesCore.framework/PhotoLibraryServicesCore", RTLD_NOW);
+	dlopen("/System/Library/PrivateFrameworks/PhotoLibraryServices.framework/PhotoLibraryServices", RTLD_NOW);
+	Class privacy = objc_getClass("PLPrivacy");
+	Method m = privacy ? class_getInstanceMethod(privacy, sel_registerName("photosAccessAllowedWithScope:")) : NULL;
+
+	if (m != NULL) {
+		method_setImplementation(m, (IMP)photos_allowed);
+	}
+	fprintf(stderr, "topaz-exc: %s: -[PLPrivacy photosAccessAllowedWithScope:] %s\n", getprogname(), m ? "answers allowed" : "not found");
+}
+
 /* lavender: a daemon that dies of an uncaught exception (assetsd: Photos black) says why on stderr */
 static void
 exc_said(id exception)
@@ -458,6 +480,13 @@ topaz_inject(void)
 		}
 		objc_setUncaughtExceptionHandler((objc_uncaught_exception_handler)exc_said);
 		objc_setExceptionPreprocessor((objc_exception_preprocessor)exc_thrown);     /* (CoreFoundation replaces the handler) */
+		/*
+		 * lavender: assetsd asks TCC (PLPrivacy) whether it may use the photo library and throws
+		 * "assetsd requires TCCPhotosService access" unless the answer is "allowed" - tccd here
+		 * does not see its private TCC entitlement (the kernel's AMFI stand-in), so Photos stayed
+		 * black. The daemon of the photo library is allowed its own library.
+		 */
+		photos_privacy_fix();
 		fprintf(stderr, "topaz-exc: %s: uncaught exceptions are told\n", name);
 		return;
 	}
