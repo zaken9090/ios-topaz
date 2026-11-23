@@ -1956,6 +1956,18 @@ frame_end(struct eagl *e, bool finished)
 			if (snapshot_wait && (uint32_t)t->width * (uint32_t)t->height < display_pixels) {
 				for_reading = true;
 			}
+			/* a context other than the display's (the one with the most frames): its pictures are read from memory */
+			if (snapshot_wait) {
+				unsigned most = 0;
+				for (unsigned c = 0; c < sizeof(contexts) / sizeof(contexts[0]); c++) {
+					if (contexts[c] != NULL && contexts[c]->frames > most) {
+						most = contexts[c]->frames;
+					}
+				}
+				if (most >= 100 && e->frames * 4 < most) {
+					for_reading = true;
+				}
+			}
 		}
 	}
 	for (unsigned i = 0; i < e->image_count; i++) {
