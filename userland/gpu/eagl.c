@@ -1499,6 +1499,29 @@ static uintptr_t prof_io_lo, prof_io_hi;
 static uintptr_t prof_m_lo, prof_m_hi;          /* libsystem_malloc: its samples are traced to who allocated */
 static struct { uintptr_t pc; uint32_t n; } prof_mcallers[2048];
 static uint32_t prof_malloc;        /* IOKit's text: a call into the driver is traced one more step, to who made it */
+/* every return address on the stack that is in libOSMesa, once a sample: inclusive counts by call site ("glprof I") */
+#define PROF_ISLOTS 16384
+static struct { uintptr_t pc; uint32_t n; } prof_inc[PROF_ISLOTS];
+static uintptr_t prof_mesa_lo, prof_mesa_hi;
+
+static void
+prof_add_inc(uintptr_t pc)
+{
+	uint32_t h = (uint32_t)((pc >> 2) * 2654435761u) & (PROF_ISLOTS - 1);
+
+	for (uint32_t i = 0; i < 64; i++) {
+		uint32_t k = (h + i) & (PROF_ISLOTS - 1);
+		if (prof_inc[k].pc == pc) {
+			prof_inc[k].n++;
+			return;
+		}
+		if (prof_inc[k].pc == 0) {
+			prof_inc[k].pc = pc;
+			prof_inc[k].n = 1;
+			return;
+		}
+	}
+}
 
 static void
 prof_add_caller(uintptr_t pc)
@@ -1561,6 +1584,13 @@ prof_main(void *arg)
 			prof_m_lo = (uintptr_t)info.dli_fbase;
 			prof_m_hi = prof_m_lo + 0x40000;
 		}
+		{
+			void *any = dlsym(RTLD_DEFAULT, "OSMesaGetProcAddress");
+			if (any != NULL && dladdr(any, &info)) {
+				prof_mesa_lo = (uintptr_t)info.dli_fbase;
+				prof_mesa_hi = prof_mesa_lo + 0x2000000;        /* (its text: under 32 MB) */
+			}
+		}
 		if (dladdr((const void *)IOConnectCallMethod, &info)) {
 			prof_io_lo = (uintptr_t)info.dli_fbase;
 			prof_io_hi = prof_io_lo + 0x60000;
@@ -1583,6 +1613,23 @@ prof_main(void *arg)
 
 				prof_add(pc);
 				prof_total++;
+				{
+					uintptr_t fp = (uintptr_t)arm_thread_state64_get_fp(st), last = 0;
+					uintptr_t lr = (uintptr_t)arm_thread_state64_get_lr(st) & 0x0000ffffffffffffull;
+
+					if (lr >= prof_mesa_lo && lr < prof_mesa_hi && pc >= prof_mesa_lo && pc < prof_mesa_hi) {
+						prof_add_inc(lr);       /* (a leaf without a frame of its own: its caller) */
+						last = lr;
+					}
+					for (int d = 0; d < 40 && fp >= prof_stack_lo && fp + 16 <= prof_stack_hi && (fp & 7) == 0; d++) {
+						uintptr_t ret = ((uintptr_t *)fp)[1] & 0x0000ffffffffffffull;
+						fp = ((uintptr_t *)fp)[0];
+						if (ret >= prof_mesa_lo && ret < prof_mesa_hi && ret != last) {
+							prof_add_inc(ret);
+							last = ret;
+						}
+					}
+				}
 				if (pc >= prof_m_lo && pc < prof_m_hi) {
 					uintptr_t ret = (uintptr_t)arm_thread_state64_get_lr(st), fp = (uintptr_t)arm_thread_state64_get_fp(st);
 
@@ -1745,6 +1792,27 @@ prof_main(void *arg)
 			}
 			say("redwood-gl: glprof up%u %u %s+%#lx <- %s+%#lx\n", prof_up[i].depth + 1, prof_up[i].n, na,
 			    (unsigned long)(prof_up[i].first - fa), nb, (unsigned long)(prof_up[i].up - fb));
+		}
+	}
+	/* call sites in Mesa with every sample under them: most first */
+	{
+		nrows = 0;
+		for (unsigned i = 0; i < PROF_ISLOTS; i++) {
+			if (prof_inc[i].pc != 0 && prof_inc[i].n * 500 >= prof_total) {
+				rows[nrows][0] = (uint32_t)(prof_inc[i].pc - prof_mesa_lo);
+				rows[nrows][1] = 0;
+				rows[nrows][2] = prof_inc[i].n;
+				nrows++;
+			}
+		}
+		qsort(rows, nrows, sizeof(rows[0]), prof_by_count);
+		for (unsigned i = 0; i < nrows; i += 16) {
+			char line[400];
+			int at = snprintf(line, sizeof(line), "glprof I");
+			for (unsigned j = i; j < nrows && j < i + 16; j++) {
+				at += snprintf(line + at, sizeof(line) - (size_t)at, " %x:%u", rows[j][0], rows[j][2]);
+			}
+			say("%s\n", line);
 		}
 	}
 	say("redwood-gl: glprof: %u samples in malloc\n", prof_malloc);
