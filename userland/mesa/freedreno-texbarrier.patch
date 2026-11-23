@@ -1,6 +1,6 @@
 --- a/src/gallium/drivers/freedreno/a5xx/fd5_context.c
 +++ b/src/gallium/drivers/freedreno/a5xx/fd5_context.c
-@@ -20,6 +20,37 @@
+@@ -20,6 +20,36 @@
  #include "fd5_rasterizer.h"
  #include "fd5_texture.h"
  #include "fd5_zsa.h"
@@ -23,7 +23,6 @@
 +      if (!batch->nondraw && batch->draw) {
 +         /* as at a batch's ends: colour cache written back, all caches flushed, then invalidated */
 +         fd5_event_write(batch, batch->draw, PC_CCU_FLUSH_COLOR_TS, true);
-+         fd5_event_write(batch, batch->draw, CACHE_FLUSH_TS, true);
 +         OUT_WFI5(batch->draw);
 +         fd5_cache_flush(batch, batch->draw);
 +         fd5_event_write(batch, batch->draw, PC_CCU_INVALIDATE_COLOR, false);
@@ -38,7 +37,7 @@
  
  static void
  fd5_context_destroy(struct pipe_context *pctx) in_dt
-@@ -77,6 +108,8 @@
+@@ -77,6 +107,8 @@
     if (!pctx)
        return NULL;
  
@@ -47,7 +46,7 @@
     util_blitter_set_texture_multisample(fd5_ctx->base.blitter, true);
  
     fd5_ctx->vsc_size_mem =
-@@ -92,5 +125,7 @@
+@@ -92,5 +124,7 @@
     fd5_ctx->border_color_uploader =
        u_upload_create(pctx, 4096, 0, PIPE_USAGE_STREAM, 0);
  
