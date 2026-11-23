@@ -45,7 +45,7 @@ GOLD4K = '--gold4k' in sys.argv
 # --all8 (with --silver --gold4k): the A73s first (the shim boots XNU on 0x100), then the A53s
 ALL8 = '--all8' in sys.argv
 # --amp (xnu 1026): mark the cores 'P' / 'E' even without --all8 (four gold cores: one P cluster)
-AMP = '--amp' in sys.argv or ALL8
+AMP = '--amp' in sys.argv or (ALL8 and '--noamp' not in sys.argv)   # --noamp: all eight without 'P'/'E' (a kernel without 1026)
 if SILVER:
     # 4K kernel: RAM from 0xc0000000 (lower bank above every carve-out, L1 index 3,
     # clear of the splash's L1 index 2) to the end of the upper bank: 3 GB, and the
