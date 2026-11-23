@@ -512,7 +512,7 @@ topaz_inject(void)
 		container_manager_fixes();
 		return;
 	}
-	if (name != NULL && (strcmp(name, "assetsd") == 0 || strcmp(name, "AegirPoster") == 0 || strcmp(name, "MobileSlideShow") == 0)) {
+	if (name != NULL && strcmp(name, "backboardd") != 0 && strcmp(name, "SpringBoard") != 0) {
 		int console = open("/dev/console", O_WRONLY);     /* (launchd gives these daemons no stderr) */
 		if (console >= 0) {
 			dup2(console, 2);
@@ -527,7 +527,9 @@ topaz_inject(void)
 		 * black. The daemon of the photo library is allowed its own library.
 		 */
 		entitlements_self_check();
-		photos_privacy_fix();
+		if (strcmp(name, "assetsd") == 0 || strcmp(name, "AegirPoster") == 0 || strcmp(name, "MobileSlideShow") == 0) {
+			photos_privacy_fix();
+		}
 		fprintf(stderr, "topaz-exc: %s: uncaught exceptions are told\n", name);
 		return;
 	}
