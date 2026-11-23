@@ -1468,6 +1468,7 @@ frame_begin(struct eagl *e)
 static struct { uintptr_t pc; uint32_t n; } prof_tab[PROF_SLOTS];
 static uint32_t prof_total, prof_lost, prof_secs, prof_delay;
 static mach_port_t prof_target;
+static char prof_thread[16];        /* boot-arg glprofthread=NAME: that thread instead (Mesa's driver thread: gdrv) */
 static int prof_started;
 static struct { uintptr_t pc; uint32_t n; } prof_callers[4096];
 static uint32_t prof_kernel, prof_kernel_unwound;
@@ -1594,6 +1595,23 @@ prof_main(void *arg)
 		if (dladdr((const void *)IOConnectCallMethod, &info)) {
 			prof_io_lo = (uintptr_t)info.dli_fbase;
 			prof_io_hi = prof_io_lo + 0x60000;
+		}
+		if (prof_thread[0] != 0) {
+			thread_act_array_t list;
+			mach_msg_type_number_t count;
+
+			if (task_threads(mach_task_self(), &list, &count) == KERN_SUCCESS) {
+				for (mach_msg_type_number_t i = 0; i < count; i++) {
+					pthread_t t = pthread_from_mach_thread_np(list[i]);
+					char name[64] = "";
+
+					if (t != NULL && pthread_getname_np(t, name, sizeof(name)) == 0 && strstr(name, prof_thread) != NULL) {
+						prof_target = list[i];
+						say("redwood-gl: glprof: thread '%s' instead of the drawing thread\n", name);
+						break;
+					}
+				}
+			}
 		}
 		pthread_t pt = pthread_from_mach_thread_np(prof_target);
 		if (pt != NULL) {
@@ -5103,6 +5121,10 @@ install(void)
 		if ((argument = strstr(arguments, "glprof=")) != NULL) {
 			prof_secs = (uint32_t)strtoul(argument + 7, (char **)&argument, 10);
 			prof_delay = *argument == ',' ? (uint32_t)strtoul(argument + 1, NULL, 10) : 60;
+			if ((argument = strstr(arguments, "glprofthread=")) != NULL) {
+				size_t n = strcspn(argument + 13, " ");
+				memcpy(prof_thread, argument + 13, n < sizeof(prof_thread) - 1 ? n : sizeof(prof_thread) - 1);
+			}
 		}
 		preserve_on = strstr(arguments, "glpreserve=1") != NULL;
 		if ((argument = strstr(arguments, "glno=")) != NULL) {
