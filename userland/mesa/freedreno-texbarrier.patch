@@ -69,3 +69,19 @@
 +{
 +   _mesa_TextureBarrierNV();
 +}
+--- a/src/gallium/drivers/freedreno/freedreno_context.c
++++ b/src/gallium/drivers/freedreno/freedreno_context.c
+@@ -51,6 +51,13 @@
+        * us in the create_fence callback that it needs an fd.
+        */
+       assert(!(flags & PIPE_FLUSH_FENCE_FD));
++
++      /* lavender: the batch went out already - the fence is the one it went out with */
++      if (batch->flushed && batch->fence && !batch->fence->batch) {
++         fd_pipe_fence_repopulate(*fencep, batch->fence);
++         fd_pipe_fence_ref(&fence, *fencep);
++         goto out;
++      }
+ 
+       fd_pipe_fence_set_batch(*fencep, batch);
+       fd_pipe_fence_ref(&batch->fence, *fencep);
