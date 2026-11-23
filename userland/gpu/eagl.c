@@ -4123,6 +4123,8 @@ my_glDrawElements(void *context, GLenum mode, GLsizei count, GLenum type, const 
 	}
 }
 
+static int finish_after_copy = 1;      /* boot-arg glfinishcopy=0: glFinish() does not wait for frame_end()'s copies */
+
 static void
 my_glFinish(void *context)
 {
@@ -4135,6 +4137,14 @@ my_glFinish(void *context)
 	clear_now(e);
 	glFinish();
 	frame_end(e, true);
+	/*
+	 * lavender: frame_end() has just copied what was drawn into the surfaces' memory (a snapshot
+	 * of an app, drawn by a context of its own and read from memory by another: the card of an
+	 * app being closed); glFinish() promises that is done too - it was not, the card came out black.
+	 */
+	if (finish_after_copy) {
+		glFinish();
+	}
 	EAGL_LEAVE(e, 0x2d0);
 }
 
@@ -4212,6 +4222,9 @@ my_glFinishObjectAPPLE(void *context, GLenum object, GLint name)
 	clear_now(e);
 	glFinish();
 	frame_end(e, true);
+	if (finish_after_copy) {
+		glFinish();
+	}
 	EAGL_LEAVE(e, 0xeb8);
 }
 
@@ -5168,6 +5181,7 @@ install(void)
 		cubic_on = strstr(arguments, "glcubic=0") == NULL;
 		no_flush_sync = strstr(arguments, "glfsync=0") != NULL;
 		gpu_refill_on = strstr(arguments, "glgpurefill=0") == NULL;
+		finish_after_copy = strstr(arguments, "glfinishcopy=0") == NULL;
 		no_noise = strstr(arguments, "glnonoise=1") != NULL;
 		tex_barrier_on = strstr(arguments, "gltexbar=0") == NULL;
 		box_inner = strstr(arguments, "glbox=4") != NULL;
