@@ -1856,12 +1856,17 @@ static void frame_functions(struct eagl *e);
  * display is about to take must be with the kernel: OSMesaFlushSync() runs the queue to its end
  * (no wait for the GPU). Without it: glFlush.
  */
+static int no_flush_sync;             /* boot-arg glfsync=0 (a test): a frame's end only queues (frames may show unfinished) */
 static int
 flush_sync(void)
 {
 	static void (*sync)(void);
 	static int looked;
 
+	if (no_flush_sync) {
+		glFlush();
+		return 1;
+	}
 	if (!looked) {
 		looked = 1;
 		sync = (void (*)(void))dlsym(RTLD_DEFAULT, "OSMesaFlushSync");
@@ -5115,6 +5120,7 @@ install(void)
 		order_on = strstr(arguments, "glorder=0") == NULL;
 		order_mesa_textures = strstr(arguments, "glorder=1") == NULL;   /* lavender: 2 by default (fewer flushes: each makes and frees a whole Mesa batch); glorder=1: as before */
 		cubic_on = strstr(arguments, "glcubic=0") == NULL;
+		no_flush_sync = strstr(arguments, "glfsync=0") != NULL;
 		no_noise = strstr(arguments, "glnonoise=1") != NULL;
 		tex_barrier_on = strstr(arguments, "gltexbar=0") == NULL;
 		box_inner = strstr(arguments, "glbox=4") != NULL;
