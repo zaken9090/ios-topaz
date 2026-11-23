@@ -71,19 +71,32 @@
 +}
 --- a/src/gallium/drivers/freedreno/freedreno_context.c
 +++ b/src/gallium/drivers/freedreno/freedreno_context.c
-@@ -32,6 +32,12 @@
-    struct fd_batch *batch = fd_bc_last_batch(ctx);
+@@ -33,6 +33,12 @@
  
     DBG("%p: %p: flush: flags=%x, fencep=%p", ctx, batch, flags, fencep);
-+
+ 
 +   /* lavender: a batch that went out already is no batch to flush - batch_flush() returns at once
 +    * for it, and a fence tied to it (threaded context: made beforehand) is never signalled
 +    */
 +   if (batch && batch->flushed && ctx->tc)
 +      fd_batch_reference(&batch, NULL);
- 
++
     if (fencep && !batch) {
        batch = fd_context_batch(ctx);
+    } else if (!batch) {
+@@ -53,6 +59,12 @@
+       assert(!(flags & PIPE_FLUSH_FENCE_FD));
+ 
+       fd_pipe_fence_set_batch(*fencep, batch);
++      /* lavender: the fence the batch was made with (gen < 6: fd_batch_create) holds a reference
++       * to the batch that its destruction never drops - let go of it before it is replaced, or
++       * every async flush leaks its batch (the 32-batch cache fills: a spin in alloc_batch_locked)
++       */
++      if (batch->fence && batch->fence != *fencep)
++         fd_pipe_fence_set_batch(batch->fence, NULL);
+       fd_pipe_fence_ref(&batch->fence, *fencep);
+ 
+       /* If we have nothing to flush, update the pre-created unflushed
 --- a/src/gallium/drivers/freedreno/freedreno_batch.c
 +++ b/src/gallium/drivers/freedreno/freedreno_batch.c
 @@ -450,6 +450,10 @@
