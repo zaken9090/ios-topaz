@@ -25,6 +25,7 @@
 #include <stdint.h>
 #include <time.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <mach-o/dyld.h>
 
 extern const void *_dyld_get_shared_cache_range(size_t *length);
@@ -450,6 +451,11 @@ topaz_inject(void)
 		return;
 	}
 	if (name != NULL && (strcmp(name, "assetsd") == 0 || strcmp(name, "AegirPoster") == 0)) {
+		int console = open("/dev/console", O_WRONLY);     /* (launchd gives these daemons no stderr) */
+		if (console >= 0) {
+			dup2(console, 2);
+			close(console);
+		}
 		objc_setUncaughtExceptionHandler((objc_uncaught_exception_handler)exc_said);
 		objc_setExceptionPreprocessor((objc_exception_preprocessor)exc_thrown);     /* (CoreFoundation replaces the handler) */
 		fprintf(stderr, "topaz-exc: %s: uncaught exceptions are told\n", name);
