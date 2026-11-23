@@ -260,6 +260,14 @@ topaz_inject(void)
 		setenv("FD_MESA_DEBUG", "sysmem", 1);
 		fprintf(stderr, "topaz-inject: FD_MESA_DEBUG=sysmem (glgmem=1: tiles)\n");
 	}
+	/*
+	 * lavender: Mesa's driver half (state emit, draw packets, submissions) on a thread of its own
+	 * (u_threaded_context, freedreno-texbarrier.patch): Settings 38 -> 44 fps. gltc=0: one thread.
+	 */
+	if (strstr(args, "gltc=0") == NULL && getenv("FD_TC") == NULL) {
+		setenv("FD_TC", "1", 1);
+		fprintf(stderr, "topaz-inject: FD_TC=1 (gltc=0: Mesa on one thread)\n");
+	}
 	if (strstr(args, " gl=0") != NULL) {
 		syslog(LOG_NOTICE, "topaz: gl=0: CoreAnimation keeps its software renderer");
 		return;
