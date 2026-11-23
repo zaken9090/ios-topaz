@@ -1902,6 +1902,9 @@ static void frame_functions(struct eagl *e);
  * display is about to take must be with the kernel: OSMesaFlushSync() runs the queue to its end
  * (no wait for the GPU). Without it: glFlush.
  */
+static uint32_t display_pixels;       /* the largest surface drawn into: the display's */
+static int snapshot_wait = 1;         /* boot-arg glsnapwait=0: a smaller surface (a snapshot) is not waited for */
+static unsigned snapshot_waits;
 static int no_flush_sync;             /* boot-arg glfsync=0 (a test): a frame's end only queues (frames may show unfinished) */
 static int
 flush_sync(void)
@@ -1942,6 +1945,19 @@ frame_end(struct eagl *e, bool finished)
 
 	clear_now(e);
 	before = now_us();
+	bool for_reading = false;       /* a surface others read from memory (a snapshot), not one the display shows */
+	for (unsigned i = 0; i < e->image_count; i++) {
+		struct image *t = &e->images[i];
+
+		if (t->target && t->drawn && t->surface != NULL) {
+			if ((uint32_t)t->width * (uint32_t)t->height > display_pixels) {
+				display_pixels = (uint32_t)t->width * (uint32_t)t->height;
+			}
+			if (snapshot_wait && (uint32_t)t->width * (uint32_t)t->height < display_pixels) {
+				for_reading = true;
+			}
+		}
+	}
 	for (unsigned i = 0; i < e->image_count; i++) {
 		if (e->images[i].target && e->images[i].drawn && e->images[i].mirror != 0) {
 			preserve_from = e->images[i].texture;   /* (the next frame starts from this one: preserve_before()) */
@@ -1954,7 +1970,15 @@ frame_end(struct eagl *e, bool finished)
 			in_place++;
 		}
 	}
-	if (in_place != 0 && !finished && wait_for_frames) {
+	if (in_place != 0 && for_reading) {
+		/*
+		 * lavender: a snapshot (SpringBoard's app cards: it reads the surface from memory as soon
+		 * as the window server says it is drawn, to make the small YUV copy the app switcher and
+		 * the card of an app being closed show): the GPU must be done - the cards were black.
+		 */
+		glFinish();
+		snapshot_waits++;
+	} else if (in_place != 0 && !finished && wait_for_frames) {
 		glFinish();             /* the display's driver reads the surface as soon as it is told of it */
 	} else if (in_place != 0 && !finished && sync_frames && flush_sync()) {
 		/* (all with the kernel now) */
@@ -2049,8 +2073,8 @@ frame_end(struct eagl *e, bool finished)
 		    fl_app, fl_order, fl_mirror, fl_mip, fl_fetch, e->flushing);
 		say("redwood-gl: frame %u: %u last frames copied in\n", e->frames, preserves);
 		preserves = 0;
-		say("redwood-gl: frame %u live: %u syncs; reads of a surface drawn into through another texture: %u targets, %u shown, %u other; %u refills by the GPU\n",
-		    e->frames, live_syncs, live_reads_target, live_reads_shown, live_reads_other, gpu_refills);
+		say("redwood-gl: frame %u live: %u syncs; reads of a surface drawn into through another texture: %u targets, %u shown, %u other; %u refills by the GPU, %u snapshots waited for\n",
+		    e->frames, live_syncs, live_reads_target, live_reads_shown, live_reads_other, gpu_refills, snapshot_waits);
 	}
 	fl_app = fl_order = fl_mirror = fl_mip = fl_fetch = 0;
 	live_syncs = live_reads_target = live_reads_shown = live_reads_other = 0;
@@ -5182,6 +5206,7 @@ install(void)
 		no_flush_sync = strstr(arguments, "glfsync=0") != NULL;
 		gpu_refill_on = strstr(arguments, "glgpurefill=0") == NULL;
 		finish_after_copy = strstr(arguments, "glfinishcopy=0") == NULL;
+		snapshot_wait = strstr(arguments, "glsnapwait=0") == NULL;
 		no_noise = strstr(arguments, "glnonoise=1") != NULL;
 		tex_barrier_on = strstr(arguments, "gltexbar=0") == NULL;
 		box_inner = strstr(arguments, "glbox=4") != NULL;
