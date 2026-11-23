@@ -1,7 +1,10 @@
+lavender-minimal 1100: the USB channel only (WinUSB log, lv:put, lv:shot, lv:key, tap/swipe,
+lv:fastboot/reboot/poweroff) on the first lavender kernel - rewritten from 1016/1017 without the
+profiler, peek/poke, smp, psci and PON dump; lv:shot reads the splash the frames are copied into.
+
 diff --git a/bsd/dev/sweet_usb.c b/bsd/dev/sweet_usb.c
-index f29a6ba..e4846ef 100644
---- a/bsd/dev/sweet_usb.c
-+++ b/bsd/dev/sweet_usb.c
+--- a/bsd/dev/sweet_usb.c	2026-11-23 13:33:32.337256073 +0000
++++ b/bsd/dev/sweet_usb.c	2026-11-23 13:33:32.341985049 +0000
 @@ -15,6 +15,20 @@
  #include <sys/systm.h>
  #include <kern/clock.h>
@@ -23,19 +26,115 @@ index f29a6ba..e4846ef 100644
  #include <kern/sched_prim.h>
  #include <machine/machine_routines.h>
  #include <arm/caches_internal.h>
-@@ -205,6 +219,11 @@ static struct {
+@@ -57,7 +71,7 @@
+ 	{ "clkref", 0x8c010 },
+ };
+ 
+-#define DWC3_PA                 0x0a600000
++#define DWC3_PA                 0x0a800000      /* lavender (SDM660) */
+ #define DWC3_SIZE               0x0000d000
+ #define QUSB2_PA                0x088e2000
+ #define QUSB2_SIZE              0x00000400
+@@ -74,61 +88,34 @@
+ sweet_usb_probe(void)
+ {
+ 	int enabled = 1;
+-	uint32_t gdscr, cbcr[sizeof(usb_cbcr) / sizeof(usb_cbcr[0])];
+-	bool clocks_on = true;
+ 
+-	/* sweetusb=0 off, 1 (default) report state only, 2 also start the USB device */
++	/*
++	 * lavender (SDM660): DWC3 at 0xa800000 (DT ssusb@a800000 / dwc3@a800000), QSCRATCH at
++	 * +0xf8800. ABL ran fastboot on it and left it powered, clocked and in device mode with
++	 * the QUSB2 PHY (0xc012000) set up; the SM7150 GCC/PHY checks of the original probe do not
++	 * apply, the controller's ID register is the check. sweetusb=1 report, 2 also start.
++	 */
++	(void)usb_cbcr;                 /* (the SM7150 clock list, not used on lavender) */
+ 	PE_parse_boot_argn("sweetusb", &enabled, sizeof(enabled));
+ 	if (!enabled) {
+ 		return;
+ 	}
+-	vm_offset_t gcc = ml_io_map(GCC_PA, GCC_SIZE);
+-	if (gcc == 0) {
+-		printf("SWEET USB: GCC map failed\n");
+-		return;
+-	}
+-	gdscr = usb_rd(gcc, GCC_USB30_PRIM_GDSCR);
+-	printf("SWEET USB: GDSC usb30_prim 0x%08x (%s)\n", gdscr, (gdscr & (1u << 31)) ? "on" : "off");
+-	for (unsigned i = 0; i < sizeof(usb_cbcr) / sizeof(usb_cbcr[0]); i++) {
+-		cbcr[i] = usb_rd(gcc, usb_cbcr[i].off);
+-		printf("SWEET USB: clk %-12s CBCR 0x%08x (%s)\n", usb_cbcr[i].name, cbcr[i],
+-		    (cbcr[i] & CBCR_CLK_OFF) ? "off" : "on");
+-	}
+-	/* DWC3 registers need the GDSC, the master clock and the config-NoC path. */
+-	clocks_on = (gdscr & (1u << 31)) && !(cbcr[0] & CBCR_CLK_OFF) && !(cbcr[3] & CBCR_CLK_OFF);
+-	if (!clocks_on) {
+-		printf("SWEET USB: controller unpowered or unclocked; DWC3 not read\n");
+-		return;
+-	}
+ 	vm_offset_t dwc = ml_io_map(DWC3_PA, DWC3_SIZE);
+ 	if (dwc == 0) {
+ 		printf("SWEET USB: DWC3 map failed\n");
+ 		return;
+ 	}
+-	printf("SWEET USB: DWC3 GSNPSID 0x%08x GCTL 0x%08x GSTS 0x%08x GUSB2PHYCFG 0x%08x\n",
+-	    usb_rd(dwc, 0xc120), usb_rd(dwc, 0xc110), usb_rd(dwc, 0xc118), usb_rd(dwc, 0xc200));
+-	printf("SWEET USB: DWC3 DCFG 0x%08x DCTL 0x%08x DEVTEN 0x%08x DSTS 0x%08x DALEPENA 0x%08x\n",
+-	    usb_rd(dwc, 0xc700), usb_rd(dwc, 0xc704), usb_rd(dwc, 0xc708), usb_rd(dwc, 0xc70c),
+-	    usb_rd(dwc, 0xc720));
+-	printf("SWEET USB: DWC3 GEVNTADR 0x%08x%08x GEVNTSIZ 0x%08x GEVNTCOUNT 0x%08x GHWPARAMS0 0x%08x\n",
+-	    usb_rd(dwc, 0xc404), usb_rd(dwc, 0xc400), usb_rd(dwc, 0xc408), usb_rd(dwc, 0xc40c),
+-	    usb_rd(dwc, 0xc140));
+-	if (enabled >= 2) {
+-		sweet_usb_gadget_start(dwc);
+-	}
+-	if (cbcr[5] & CBCR_CLK_OFF) {
+-		printf("SWEET USB: ahb2phy clock off; QUSB2 PHY not read\n");
++	uint32_t id = usb_rd(dwc, 0xc120);
++	printf("SWEET USB: DWC3 GSNPSID 0x%08x GCTL 0x%08x GSTS 0x%08x GUSB2PHYCFG 0x%08x DCFG 0x%08x DCTL 0x%08x DSTS 0x%08x\n",
++	    id, usb_rd(dwc, 0xc110), usb_rd(dwc, 0xc118), usb_rd(dwc, 0xc200), usb_rd(dwc, 0xc700),
++	    usb_rd(dwc, 0xc704), usb_rd(dwc, 0xc70c));
++	if ((id >> 16) != 0x5533) {
++		printf("SWEET USB: no DWC3 answering: not started\n");
+ 		return;
+ 	}
+-	vm_offset_t phy = ml_io_map(QUSB2_PA, QUSB2_SIZE);
+-	if (phy == 0) {
+-		return;
++	if (enabled >= 2) {
++		sweet_usb_gadget_start(dwc);
+ 	}
+-	/* DT qcom,qusb-phy-reg-offset order (Linux phy-msm-qusb-v2.c): PORT_TUNE1 0x240,
+-	 * PLL_COMMON_STATUS_ONE 0x1a0, PWR_CTRL1 0x210, INTR_CTRL 0x230,
+-	 * PLL_CORE_INPUT_OVERRIDE 0x0a8, TEST1 0x254. */
+-	printf("SWEET USB: QUSB2 PLL_STATUS 0x%08x PWR_CTRL1 0x%08x PORT_TUNE1 0x%08x TEST1 0x%08x\n",
+-	    usb_rd(phy, 0x1a0), usb_rd(phy, 0x210), usb_rd(phy, 0x240), usb_rd(phy, 0x254));
+ }
+ 
+ /*
+@@ -164,7 +151,7 @@
+  * session; Linux dwc3-qcom forces that in software when the charger
+  * reports a cable (dwc3_qcom_vbus_override_enable).
+  */
+-#define QSCRATCH_PA             0x0a6f8800
++#define QSCRATCH_PA             0x0a8f8800      /* lavender: core + 0xf8800 */
+ #define QSCRATCH_HS_PHY_CTRL    0x10
+ #define   UTMI_OTG_VBUS_VALID   (1u << 20)
+ #define   SW_SESSVLD_SEL        (1u << 28)
+@@ -232,6 +219,12 @@
  	mbuf_t      txq[UD_TXQ];
  	unsigned    txq_head, txq_count;
  	bool        tx_busy;
 +	uint64_t    tx_since;       /* lavender: mach_absolute_time() the TX transfer started */
 +	uint64_t    reset_at;       /* lavender: last bus reset, 0 once a SETUP followed it */
++	bool        reset_rearmed;  /* lavender: ep0 SETUP armed again once after that reset */
 +	uint32_t    restarts;
 +	bool        rx_active;      /* lavender: a transfer is armed on bulk OUT */
 +	bool        rx_rearm;       /* lavender: arming it failed: ud_thread retries */
  	uint64_t    rx_frames, tx_frames;
  } ud;
  
-@@ -260,7 +279,7 @@ ud_epcmd(unsigned ep, uint32_t cmd, uint32_t p0, uint32_t p1, uint32_t p2)
+@@ -287,7 +280,7 @@
  }
  
  /* One TRB (at DMA offset trb) on physical endpoint ep. */
@@ -44,7 +143,7 @@ index f29a6ba..e4846ef 100644
  ud_start_trb(unsigned ep, uint32_t trb, uint32_t buf, uint32_t len, uint32_t ctl)
  {
  	volatile uint32_t *t = (volatile uint32_t *)(ud.dma + trb);
-@@ -275,7 +294,7 @@ ud_start_trb(unsigned ep, uint32_t trb, uint32_t buf, uint32_t len, uint32_t ctl
+@@ -302,7 +295,7 @@
  		ud_sync(buf, len);
  	}
  	uint64_t tpa = ud.dma_pa + trb;
@@ -53,30 +152,108 @@ index f29a6ba..e4846ef 100644
  }
  
  static void
-@@ -426,15 +445,20 @@ ud_w_send(const char *buf, uint32_t len)
- 	if (ud.configured && !ud.tx_busy && len > 0 && len < UD_FRAME_MAX) {
- 		memcpy((void *)(ud.dma + UD_TX), buf, len);
- 		ud.tx_busy = true;
+@@ -373,7 +366,100 @@
+ 	return n;
+ }
+ 
++/*
++ * lavender: a WinUSB function instead of CDC-ECM (Windows has no in-box ECM driver). Vendor
++ * class interface 0 with bulk IN 0x81 (the console log, as it is written) and bulk OUT 0x01;
++ * a BOS platform capability with MS OS 2.0 descriptors (CompatibleID "WINUSB" and a
++ * DeviceInterfaceGUID) makes Windows 8.1+ bind WinUSB by itself, nothing to install. The PC
++ * reads it with tools/usblog.py. VID 0x1209 / PID 0x0002 (pid.codes test IDs).
++ */
++#define UD_MSOS_VENDOR  0x20
++static const uint8_t ud_w_dev_desc[18] = {
++	18, 1, 0x10, 0x02, 0xff, 0x00, 0x00, 64,
++	0x09, 0x12, 0x02, 0x00, 0x00, 0x01, 1, 2, 3, 1,
++};
++static const uint8_t ud_w_cfg_desc[32] = {
++	9, 2, 32, 0, 1, 1, 0, 0x80, 250,                /* config: 1 interface, 500 mA */
++	9, 4, 0, 0, 2, 0xff, 0x00, 0x00, 0,             /* interface 0: vendor, 2 endpoints */
++	7, 5, 0x81, 0x02, 0x00, 0x02, 0,                /* ep 0x81 bulk IN, 512 */
++	7, 5, 0x01, 0x02, 0x00, 0x02, 0,                /* ep 0x01 bulk OUT, 512 */
++};
++#define UD_MSOS_SET_LEN 162
++static const uint8_t ud_w_bos[33] = {
++	5, 0x0f, 33, 0, 1,                              /* BOS: 33 bytes, 1 capability */
++	28, 0x10, 0x05, 0x00,                           /* platform capability */
++	0xdf, 0x60, 0xdd, 0xd8, 0x89, 0x45, 0xc7, 0x4c, /* MS OS 2.0 UUID D8DD60DF-4589-4CC7-9CD2-659D9E648A9F */
++	0x9c, 0xd2, 0x65, 0x9d, 0x9e, 0x64, 0x8a, 0x9f,
++	0x00, 0x00, 0x03, 0x06,                         /* Windows 8.1 */
++	UD_MSOS_SET_LEN, 0, UD_MSOS_VENDOR, 0,
++};
++
++static uint32_t
++ud_w_msos_set(uint8_t *o)
++{
++	static const char guid[] = "{8F6B4C2E-5A1D-4E7B-9C3A-2D6E1F0A7B55}";
++	static const char name[] = "DeviceInterfaceGUIDs";
++	uint32_t n = 0;
++
++	/* set header */
++	o[n++] = 10; o[n++] = 0; o[n++] = 0; o[n++] = 0;
++	o[n++] = 0x00; o[n++] = 0x00; o[n++] = 0x03; o[n++] = 0x06;
++	o[n++] = UD_MSOS_SET_LEN; o[n++] = 0;
++	/* compatible ID "WINUSB" */
++	o[n++] = 20; o[n++] = 0; o[n++] = 3; o[n++] = 0;
++	memcpy(o + n, "WINUSB\0\0", 8); n += 8;
++	bzero(o + n, 8); n += 8;
++	/* registry property DeviceInterfaceGUIDs, REG_MULTI_SZ */
++	o[n++] = 132; o[n++] = 0; o[n++] = 4; o[n++] = 0;
++	o[n++] = 7; o[n++] = 0;
++	o[n++] = 42; o[n++] = 0;
++	for (unsigned i = 0; i < sizeof(name); i++) {   /* (with its terminating NUL: 21 UTF-16 units) */
++		o[n++] = (uint8_t)name[i]; o[n++] = 0;
++	}
++	o[n++] = 80; o[n++] = 0;
++	for (unsigned i = 0; i < sizeof(guid); i++) {   /* 39 units with the NUL ... */
++		o[n++] = (uint8_t)guid[i]; o[n++] = 0;
++	}
++	o[n++] = 0; o[n++] = 0;                         /* ... and the list's final NUL */
++	return n;
++}
++
++static bool
++ud_winusb(void)
++{
++	static int mode = -1;
++	if (mode < 0) {
++		uint32_t v = 1;
++		PE_parse_boot_argn("lv_winusb", &v, sizeof(v));
++		mode = v != 0;
++	}
++	return mode != 0;
++}
++
++/* Send len bytes from buf on the bulk IN endpoint (WinUSB mode); false if busy/not configured. */
++static bool
++ud_w_send(const char *buf, uint32_t len)
++{
++	bool sent = false;
++
++	lck_mtx_lock(ud.lock);
++	if (ud.configured && !ud.tx_busy && len > 0 && len < UD_FRAME_MAX) {
++		memcpy((void *)(ud.dma + UD_TX), buf, len);
++		ud.tx_busy = true;
 +		ud.tx_since = mach_absolute_time();
- 		ud.tx_frames++;
--		ud_start_trb(EP_TX, UD_TRB_TX, UD_TX, len, TRBCTL_NORMAL);
--		sent = true;
++		ud.tx_frames++;
 +		if (ud_start_trb(EP_TX, UD_TRB_TX, UD_TX, len, TRBCTL_NORMAL) == 0) {
 +			sent = true;
 +		} else {
 +			ud.tx_busy = false;     /* lavender: not started: the log thread tries again */
 +		}
- 	}
- 	lck_mtx_unlock(ud.lock);
- 	return sent;
- }
- 
++	}
++	lck_mtx_unlock(ud.lock);
++	return sent;
++}
++
  static void ud_rx_arm(void);
 +static bool ud_hw_init(void);
  static void ud_tx_kick_locked(void);
  
  /* NETWORK_CONNECTION notification: the host brings its link up on it. */
-@@ -486,6 +510,7 @@ ud_setup(void)
+@@ -425,15 +511,36 @@
  	bool ok = true;
  
  	printf("SWEET USB: setup %02x %02x %04x %04x len %u\n", type, req, value, index, length);
@@ -84,7 +261,38 @@ index f29a6ba..e4846ef 100644
  	ud.data_in = (type & 0x80) != 0;
  	if ((type & 0x60) == 0x20) {    /* class request (e.g. SET_ETHERNET_PACKET_FILTER) */
  		ok = (length == 0);
-@@ -540,6 +565,30 @@ ud_setup(void)
++	} else if ((type & 0x60) == 0x40 && ud_winusb() && req == UD_MSOS_VENDOR && index == 7) {
++		n = ud_w_msos_set(data);        /* MS OS 2.0 descriptor set */
+ 	} else if ((type & 0x60) != 0) {
+ 		ok = false;
+ 	} else if (req == 6) {          /* GET_DESCRIPTOR */
+ 		switch (value >> 8) {
+-		case 1: memcpy(data, ud_dev_desc, sizeof(ud_dev_desc)); n = sizeof(ud_dev_desc); break;
+-		case 2: memcpy(data, ud_cfg_desc, sizeof(ud_cfg_desc)); n = sizeof(ud_cfg_desc); break;
++		case 1:
++			if (ud_winusb()) {
++				memcpy(data, ud_w_dev_desc, sizeof(ud_w_dev_desc)); n = sizeof(ud_w_dev_desc);
++			} else {
++				memcpy(data, ud_dev_desc, sizeof(ud_dev_desc)); n = sizeof(ud_dev_desc);
++			}
++			break;
++		case 2:
++			if (ud_winusb()) {
++				memcpy(data, ud_w_cfg_desc, sizeof(ud_w_cfg_desc)); n = sizeof(ud_w_cfg_desc);
++			} else {
++				memcpy(data, ud_cfg_desc, sizeof(ud_cfg_desc)); n = sizeof(ud_cfg_desc);
++			}
++			break;
++		case 0x0f:                      /* BOS (WinUSB mode) */
++			ok = ud_winusb();
++			if (ok) {
++				memcpy(data, ud_w_bos, sizeof(ud_w_bos)); n = sizeof(ud_w_bos);
++			}
++			break;
+ 		case 3: n = ud_string(value & 0xff, data); ok = n != 0; break;
+ 		default: ok = false; break;
+ 		}
+@@ -459,6 +566,30 @@
  		}
  	} else if (req == 10) {         /* GET_INTERFACE */
  		data[0] = index == 1 ? ud.data_alt : 0; n = 1;
@@ -115,7 +323,7 @@ index f29a6ba..e4846ef 100644
  	} else if (req == 1 || req == 3) { /* CLEAR/SET_FEATURE (halt, remote wakeup) */
  	} else {
  		ok = false;
-@@ -568,7 +617,37 @@ ud_setup(void)
+@@ -487,7 +618,547 @@
  static void
  ud_rx_arm(void)
  {
@@ -151,13 +359,16 @@ index f29a6ba..e4846ef 100644
 +	dwc_wr(DALEPENA, dwc_rd(DALEPENA) & ~((1u << EP_RX) | (1u << EP_TX) | (1u << EP_INT)));
 +	lck_mtx_unlock(ud.lock);
 +	printf("SWEET USB: unconfigured\n");
- }
- 
- /*
-@@ -579,11 +658,767 @@ ud_rx_arm(void)
-  *   "lv:reboot"    PSCI SYSTEM_RESET
-  *   "lv:poweroff"  PSCI SYSTEM_OFF
-  */
++}
++
++/*
++ * lavender: commands from the PC on bulk OUT 0x01 (WinUSB mode, tools/usblog.py --cmd):
++ *   "lv:fastboot"  restart into the bootloader's fastboot: IMEM restart_reason (DT
++ *                  qcom,msm-imem@146bf000 restart_reason@65c) = 0x77665500, as Linux
++ *                  msm-poweroff.c writes for "reboot bootloader", then PSCI SYSTEM_RESET
++ *   "lv:reboot"    PSCI SYSTEM_RESET
++ *   "lv:poweroff"  PSCI SYSTEM_OFF
++ */
 +/*
 + * lavender: "lv:shot [N]" - the frame on the panel, every Nth pixel (default 3: 360 x 780),
 + * as RGB565 on bulk IN between "@@LVSHOT w h bytes@@" and "@@LVSHOT END@@" lines; the log
@@ -179,8 +390,7 @@ index f29a6ba..e4846ef 100644
 +	return false;
 +}
 +
- static void
--ud_psci(uint64_t fn)
++static void
 +ud_shot_thread(void *arg __unused, wait_result_t wr __unused)
 +{
 +	static char out[1600];
@@ -397,423 +607,6 @@ index f29a6ba..e4846ef 100644
 +}
 +
 +/*
-+ * lavender: "lv:prof NAME SECS" - a sampling profiler for one process (default backboardd, 5 s).
-+ * Every millisecond each other online CPU gets an immediate cross-call; on it, if the thread it
-+ * interrupted belongs to NAME, that thread's user pc and lr are counted (its user registers as
-+ * saved when it last entered the kernel: a thread inside a syscall counts at its call site).
-+ * Then: how the CPUs' time went (NAME / other / idle), the busiest images (dyld's image list),
-+ * the busiest addresses and callers, as "PROF ..." lines in the log.
-+ */
-+extern void *cpu_datap(int cpu);
-+extern kern_return_t cpu_immediate_xcall(int cpu_number, void (*func)(void *), void *param);
-+extern kern_return_t vm_map_read_user(vm_map_t map, vm_map_address_t src, void *dst, vm_size_t size);
-+extern task_t proc_task(proc_t);
-+extern task_t get_threadtask(thread_t);
-+extern arm_saved_state_t *find_user_regs(thread_t);
-+extern vm_map_t get_task_map(task_t);
-+extern kern_return_t task_info(task_t, task_flavor_t, task_info_t, mach_msg_type_number_t *);
-+
-+#define LVP_SLOTS 8192
-+static struct { uint64_t key; uint32_t n; uint32_t pad; } lvp_pc[LVP_SLOTS], lvp_lr[LVP_SLOTS],
-+    lvp_kpc[LVP_SLOTS], lvp_k1[LVP_SLOTS], lvp_k2[LVP_SLOTS];
-+static volatile uint32_t lvp_kern;              /* NAME's samples that were inside the kernel */
-+static struct { volatile int pid; volatile uint32_t n; } lvp_procs[48];   /* the other processes' samples */
-+extern void *get_bsdtask_info(task_t);
-+static volatile task_t lvp_task;
-+static volatile uint32_t lvp_hits, lvp_other, lvp_idle, lvp_lost;
-+static volatile bool lvp_busy;
-+static char lvp_name[32];
-+static uint32_t lvp_secs;
-+static thread_t lvp_idle_thread_dummy;
-+
-+static void
-+lvp_add(typeof(lvp_pc[0]) *t, uint64_t key)
-+{
-+	uint32_t h = (uint32_t)((key >> 2) * 2654435761u) & (LVP_SLOTS - 1);
-+	for (int i = 0; i < 64; i++, h = (h + 1) & (LVP_SLOTS - 1)) {
-+		uint64_t k = t[h].key;
-+		if (k == key || (k == 0 && os_atomic_cmpxchg(&t[h].key, 0ull, key, relaxed)) || t[h].key == key) {
-+			os_atomic_inc(&t[h].n, relaxed);
-+			return;
-+		}
-+	}
-+	os_atomic_inc(&lvp_lost, relaxed);
-+}
-+
-+static void
-+lvp_sample(void *arg __unused)
-+{
-+	thread_t th = current_thread();
-+	task_t task = get_threadtask(th);
-+
-+	if (task == lvp_task) {
-+		arm_saved_state_t *ss = find_user_regs(th);
-+		uintptr_t kb[3] = { 0, 0, 0 };
-+		struct backtrace_control ctl = BTCTL_INIT;
-+		ctl.btc_flags = BTF_KERN_INTERRUPTED;
-+		unsigned kn = backtrace(kb, 3, &ctl, NULL);     /* 0 when it was in user space */
-+		if (kn > 0) {
-+			os_atomic_inc(&lvp_kern, relaxed);
-+			lvp_add(lvp_kpc, VM_KERNEL_UNSLIDE(kb[0]));
-+			if (kn > 1) {
-+				lvp_add(lvp_k1, VM_KERNEL_UNSLIDE(kb[1]));
-+			}
-+			if (kn > 2) {
-+				lvp_add(lvp_k2, VM_KERNEL_UNSLIDE(kb[2]));
-+			}
-+		}
-+		if (ss != NULL) {
-+			lvp_add(lvp_pc, get_saved_state_pc(ss));
-+			lvp_add(lvp_lr, get_saved_state_lr(ss));
-+			os_atomic_inc(&lvp_hits, relaxed);
-+			return;
-+		}
-+	}
-+	if (task == kernel_task) {
-+		os_atomic_inc(&lvp_idle, relaxed);      /* idle thread or a kernel thread */
-+	} else {
-+		os_atomic_inc(&lvp_other, relaxed);
-+		void *bp = get_bsdtask_info(task);
-+		int pid = bp != NULL ? proc_pid((proc_t)bp) : -1;
-+		for (int i = 0; i < 48; i++) {
-+			int have = lvp_procs[i].pid;
-+			if (have == pid || (have == 0 && os_atomic_cmpxchg(&lvp_procs[i].pid, 0, pid, relaxed)) ||
-+			    lvp_procs[i].pid == pid) {
-+				os_atomic_inc(&lvp_procs[i].n, relaxed);
-+				break;
-+			}
-+		}
-+	}
-+}
-+
-+static int
-+lvp_find_proc(proc_t p, void *arg __unused)
-+{
-+	char name[32];
-+	proc_name(proc_pid(p), name, sizeof(name));
-+	if (lvp_task == TASK_NULL && strncmp(name, lvp_name, sizeof(name)) == 0) {
-+		task_t t = proc_task(p);
-+		if (t != TASK_NULL) {
-+			task_reference(t);
-+			lvp_task = t;
-+		}
-+	}
-+	return PROC_RETURNED;
-+}
-+
-+struct lvp_img { uint64_t load; uint64_t path; uint64_t date; };
-+
-+static int
-+lvp_img_cmp(const void *a, const void *b)
-+{
-+	uint64_t x = ((const struct lvp_img *)a)->load, y = ((const struct lvp_img *)b)->load;
-+	return x < y ? -1 : x > y;
-+}
-+
-+/* index of the image holding pc (the last one loaded at or below it), -1 if none */
-+static int
-+lvp_img_of(const struct lvp_img *im, uint32_t n, uint64_t pc)
-+{
-+	int lo = 0, hi = (int)n - 1, best = -1;
-+	while (lo <= hi) {
-+		int mid = (lo + hi) / 2;
-+		if (im[mid].load <= pc) {
-+			best = mid;
-+			lo = mid + 1;
-+		} else {
-+			hi = mid - 1;
-+		}
-+	}
-+	return best;
-+}
-+
-+static void
-+lvp_path(vm_map_t map, uint64_t up, char *out, size_t len)
-+{
-+	out[0] = 0;
-+	if (up == 0 || vm_map_read_user(map, up, out, len - 1) != KERN_SUCCESS) {
-+		strlcpy(out, "?", len);
-+	}
-+	out[len - 1] = 0;
-+	const char *slash = NULL;
-+	for (const char *q = out; *q; q++) {
-+		if (*q == '/') {
-+			slash = q;
-+		}
-+	}
-+	if (slash != NULL) {
-+		memmove(out, slash + 1, strlen(slash + 1) + 1);
-+	}
-+}
-+
-+static void
-+lvp_report(typeof(lvp_pc[0]) *t, const char *what, int top, vm_map_t map, struct lvp_img *im, uint32_t nim)
-+{
-+	static bool taken[LVP_SLOTS];
-+	char path[96];
-+
-+	bzero(taken, sizeof(taken));
-+	for (int r = 0; r < top; r++) {
-+		int best = -1;
-+		for (int i = 0; i < LVP_SLOTS; i++) {
-+			if (t[i].key != 0 && !taken[i] && (best < 0 || t[i].n > t[best].n)) {
-+				best = i;
-+			}
-+		}
-+		if (best < 0 || t[best].n < 2) {
-+			break;
-+		}
-+		taken[best] = true;
-+		int ii = im != NULL ? lvp_img_of(im, nim, t[best].key) : -1;
-+		if (ii >= 0) {
-+			lvp_path(map, im[ii].path, path, sizeof(path));
-+		} else {
-+			strlcpy(path, "?", sizeof(path));
-+		}
-+		printf("PROF %s %2d: 0x%llx %u (%u.%u%%) %s+0x%llx\n", what, r, t[best].key, t[best].n,
-+		    t[best].n * 100 / (lvp_hits ? lvp_hits : 1), (t[best].n * 1000 / (lvp_hits ? lvp_hits : 1)) % 10,
-+		    path, ii >= 0 ? t[best].key - im[ii].load : 0);
-+	}
-+}
-+
-+static void
-+lvp_thread(void *arg __unused, wait_result_t wr __unused)
-+{
-+	int maxcpu = (int)ml_get_max_cpu_number();
-+	uint64_t rounds = 0;
-+	struct task_dyld_info di;
-+	mach_msg_type_number_t cnt = TASK_DYLD_INFO_COUNT;
-+	struct lvp_img *im = NULL;
-+	uint32_t nim = 0;
-+	uint64_t hdr[24];
-+
-+	bzero(lvp_pc, sizeof(lvp_pc));
-+	bzero(lvp_lr, sizeof(lvp_lr));
-+	bzero(lvp_kpc, sizeof(lvp_kpc));
-+	bzero(lvp_k1, sizeof(lvp_k1));
-+	bzero(lvp_k2, sizeof(lvp_k2));
-+	bzero((void *)lvp_procs, sizeof(lvp_procs));
-+	lvp_kern = 0;
-+	lvp_hits = lvp_other = lvp_idle = lvp_lost = 0;
-+	lvp_task = TASK_NULL;
-+	proc_iterate(PROC_ALLPROCLIST, lvp_find_proc, NULL, NULL, NULL);
-+	if (lvp_task == TASK_NULL) {
-+		printf("PROF %s: no such process\n", lvp_name);
-+		lvp_busy = false;
-+		return;
-+	}
-+	printf("PROF %s: sampling %u s on CPUs 0-%d\n", lvp_name, lvp_secs, maxcpu);
-+	uint64_t end = mach_absolute_time(), ms;
-+	nanoseconds_to_absolutetime((uint64_t)lvp_secs * NSEC_PER_SEC, &ms);
-+	end += ms;
-+	while (mach_absolute_time() < end) {
-+		int me = cpu_number();
-+		for (int c = 0; c <= maxcpu; c++) {
-+			if (c != me && cpu_datap(c) != NULL) {
-+				(void)cpu_immediate_xcall(c, lvp_sample, (void *)&lvp_idle_thread_dummy);
-+			}
-+		}
-+		rounds++;
-+		ud_sleep_ms(1);
-+	}
-+	ud_sleep_ms(5);
-+	uint32_t all = lvp_hits + lvp_other + lvp_idle;
-+	printf("PROF %s: %llu rounds, %u samples: %s %u%%, other processes %u%%, kernel/idle %u%% (lost %u)\n",
-+	    lvp_name, rounds, all, lvp_name, lvp_hits * 100 / (all ? all : 1), lvp_other * 100 / (all ? all : 1),
-+	    lvp_idle * 100 / (all ? all : 1), lvp_lost);
-+
-+	/* dyld's image list: which library each address is in */
-+	vm_map_t map = get_task_map(lvp_task);
-+	if (task_info(lvp_task, TASK_DYLD_INFO, (task_info_t)&di, &cnt) == KERN_SUCCESS && di.all_image_info_addr != 0 &&
-+	    vm_map_read_user(map, di.all_image_info_addr, hdr, sizeof(hdr)) == KERN_SUCCESS) {
-+		uint32_t count = (uint32_t)(hdr[0] >> 32);
-+		uint64_t arr = hdr[1];
-+		printf("PROF images %u, shared cache slide 0x%llx base 0x%llx\n", count, hdr[19], hdr[22]);
-+		if (count > 0 && count < 4096) {
-+			im = (struct lvp_img *)kalloc_data(count * sizeof(*im), Z_WAITOK);
-+			if (im != NULL && vm_map_read_user(map, arr, im, count * sizeof(*im)) == KERN_SUCCESS) {
-+				nim = count;
-+				qsort(im, nim, sizeof(*im), lvp_img_cmp);
-+			}
-+		}
-+	}
-+	/* per image */
-+	if (nim != 0) {
-+		static uint32_t per[4096];
-+		char path[96];
-+		bzero(per, sizeof(per));
-+		for (int i = 0; i < LVP_SLOTS; i++) {
-+			if (lvp_pc[i].key != 0) {
-+				int ii = lvp_img_of(im, nim, lvp_pc[i].key);
-+				if (ii >= 0) {
-+					per[ii] += lvp_pc[i].n;
-+				}
-+			}
-+		}
-+		for (int r = 0; r < 15; r++) {
-+			int best = -1;
-+			for (uint32_t i = 0; i < nim; i++) {
-+				if (per[i] != 0 && (best < 0 || per[i] > per[best])) {
-+					best = (int)i;
-+				}
-+			}
-+			if (best < 0) {
-+				break;
-+			}
-+			lvp_path(map, im[best].path, path, sizeof(path));
-+			printf("PROF image %2d: %u.%u%% %s (load 0x%llx)\n", r, per[best] * 100 / (lvp_hits ? lvp_hits : 1),
-+			    (per[best] * 1000 / (lvp_hits ? lvp_hits : 1)) % 10, path, im[best].load);
-+			per[best] = 0;
-+		}
-+	}
-+	printf("PROF %s: %u of its %u samples inside the kernel (unslid kernel addresses below)\n", lvp_name, lvp_kern, lvp_hits);
-+	for (int r = 0; r < 10; r++) {
-+		int best = -1;
-+		for (int i = 0; i < 48; i++) {
-+			if (lvp_procs[i].n != 0 && (best < 0 || lvp_procs[i].n > lvp_procs[best].n)) {
-+				best = i;
-+			}
-+		}
-+		if (best < 0) {
-+			break;
-+		}
-+		char pn[32] = "?";
-+		if (lvp_procs[best].pid > 0) {
-+			proc_name(lvp_procs[best].pid, pn, sizeof(pn));
-+		}
-+		printf("PROF other %d: %s[%d] %u%% of all samples\n", r, pn, lvp_procs[best].pid,
-+		    lvp_procs[best].n * 100 / (all ? all : 1));
-+		lvp_procs[best].n = 0;
-+	}
-+	lvp_report(lvp_pc, "pc", 30, map, im, nim);
-+	lvp_report(lvp_lr, "lr", 15, map, im, nim);
-+	lvp_report(lvp_kpc, "kpc", 30, NULL, NULL, 0);
-+	lvp_report(lvp_k1, "kcall1", 20, NULL, NULL, 0);
-+	lvp_report(lvp_k2, "kcall2", 20, NULL, NULL, 0);
-+	printf("PROF %s: done\n", lvp_name);
-+	if (im != NULL) {
-+		kfree_data(im, nim ? nim * sizeof(*im) : 0);
-+	}
-+	task_deallocate(lvp_task);
-+	lvp_task = TASK_NULL;
-+	lvp_busy = false;
-+}
-+
-+/*
-+ * lavender debug: "lv:peek PA [N]" prints N (default 1, at most 64) 32-bit registers from
-+ * physical address PA (hex); "lv:poke PA VALUE" writes one (hex). Device registers only.
-+ */
-+static uint64_t
-+ud_hex(const char **p)
-+{
-+	uint64_t v = 0;
-+	while (**p == ' ') {
-+		(*p)++;
-+	}
-+	if ((*p)[0] == '0' && ((*p)[1] == 'x' || (*p)[1] == 'X')) {
-+		*p += 2;
-+	}
-+	for (;; (*p)++) {
-+		char c = **p;
-+		if (c >= '0' && c <= '9') {
-+			v = v * 16 + (uint64_t)(c - '0');
-+		} else if (c >= 'a' && c <= 'f') {
-+			v = v * 16 + (uint64_t)(c - 'a' + 10);
-+		} else if (c >= 'A' && c <= 'F') {
-+			v = v * 16 + (uint64_t)(c - 'A' + 10);
-+		} else {
-+			break;
-+		}
-+	}
-+	return v;
-+}
-+
-+static bool
-+ud_w_peek_command(const char *buf, uint32_t len)
-+{
-+	char line[80];
-+	const char *q;
-+	bool poke;
-+
-+	if (len < 9 || len >= sizeof(line)) {
-+		return false;
-+	}
-+	memcpy(line, buf, len);
-+	line[len] = 0;
-+	if (strncmp(line, "lv:peek ", 8) == 0) {
-+		poke = false;
-+	} else if (strncmp(line, "lv:poke ", 8) == 0) {
-+		poke = true;
-+	} else {
-+		return false;
-+	}
-+	q = line + 8;
-+	uint64_t pa = ud_hex(&q) & ~3ull, arg = ud_hex(&q);
-+	uint32_t n = poke ? 1 : (arg == 0 ? 1 : (arg > 64 ? 64 : (uint32_t)arg));
-+	vm_offset_t va = ml_io_map((vm_offset_t)(pa & ~0xfffull), 0x2000);
-+	if (va == 0 || (pa & 0xfff) + n * 4 > 0x2000) {
-+		printf("SWEET USB: peek 0x%llx: cannot map\n", pa);
-+		return true;
-+	}
-+	volatile uint32_t *r = (volatile uint32_t *)(va + (pa & 0xfff));
-+	if (poke) {
-+		uint32_t old = r[0];
-+		r[0] = (uint32_t)arg;
-+		__asm__ volatile ("dsb sy" ::: "memory");
-+		printf("SWEET USB: poke 0x%llx: 0x%08x -> 0x%08x (reads 0x%08x)\n", pa, old, (uint32_t)arg, r[0]);
-+		return true;
-+	}
-+	for (uint32_t i = 0; i < n; i += 4) {
-+		char out[100];
-+		int m = snprintf(out, sizeof(out), "SWEET USB: peek 0x%llx:", pa + i * 4);
-+		for (uint32_t j = i; j < n && j < i + 4; j++) {
-+			m += snprintf(out + m, sizeof(out) - (size_t)m, " %08x", r[j]);
-+		}
-+		printf("%s\n", out);
-+	}
-+	return true;
-+}
-+
-+static bool
-+ud_w_prof_command(const char *buf, uint32_t len)
-+{
-+	char line[64];
-+	thread_t th;
-+	uint32_t i = 8, n = 0, secs = 0;
-+
-+	if (len < 7 || len >= sizeof(line) || memcmp(buf, "lv:prof", 7) != 0) {
-+		return false;
-+	}
-+	memcpy(line, buf, len);
-+	line[len] = 0;
-+	strlcpy(lvp_name, "backboardd", sizeof(lvp_name));
-+	if (len > 8) {
-+		while (line[i] != 0 && line[i] != ' ' && n < sizeof(lvp_name) - 1) {
-+			lvp_name[n++] = line[i++];
-+		}
-+		if (n > 0) {
-+			lvp_name[n] = 0;
-+		}
-+		while (line[i] == ' ') {
-+			i++;
-+		}
-+		while (line[i] >= '0' && line[i] <= '9') {
-+			secs = secs * 10 + (uint32_t)(line[i++] - '0');
-+		}
-+	}
-+	lvp_secs = secs > 0 && secs <= 60 ? secs : 5;
-+	if (!lvp_busy) {
-+		lvp_busy = true;
-+		if (kernel_thread_start(lvp_thread, NULL, &th) == KERN_SUCCESS) {
-+			thread_deallocate(th);
-+		} else {
-+			lvp_busy = false;
-+		}
-+	}
-+	return true;
-+}
-+
-+/*
 + * lavender: "lv:put SIZE PATH" - the next SIZE bytes on bulk OUT are a file for PATH (at most
 + * 64 MB): the old file is unlinked first (a process that has it mapped keeps the old one), the
 + * new one written and synced from a thread of its own. tools/usblog.py --put LOCAL PATH.
@@ -830,6 +623,7 @@ index f29a6ba..e4846ef 100644
 +	vfs_context_t ctx = vfs_context_kernel();
 +	vnode_t vp = NULLVP;
 +	int resid = 0, err;
++
 +
 +	err = unlink1(ctx, NULLVP, CAST_USER_ADDR_T(ud_put_path), UIO_SYSSPACE, 0);
 +	int uerr = err;
@@ -908,9 +702,8 @@ index f29a6ba..e4846ef 100644
 +
 +static uint64_t
 +ud_psci2(uint64_t fn, uint64_t a1, uint64_t a2)
- {
- 	register uint64_t x0 __asm__("x0") = fn;
--	__asm__ volatile ("smc #0" : "+r"(x0) : : "x1", "x2", "x3", "memory");
++{
++	register uint64_t x0 __asm__("x0") = fn;
 +	register uint64_t x1 __asm__("x1") = a1;
 +	register uint64_t x2 __asm__("x2") = a2;
 +	__asm__ volatile ("smc #0" : "+r"(x0), "+r"(x1), "+r"(x2) : : "x3", "memory");
@@ -921,14 +714,18 @@ index f29a6ba..e4846ef 100644
 +ud_psci(uint64_t fn)
 +{
 +	(void)ud_psci2(fn, 0, 0);
- }
- 
- static bool
-@@ -596,10 +1431,51 @@ ud_w_command(const char *buf, uint32_t len)
- 			*(volatile uint32_t *)(imem + 0x65c) = 0x77665500;
- 			__asm__ volatile ("dsb sy" ::: "memory");
- 		}
--		delay(200000);
++}
++
++static bool
++ud_w_command(const char *buf, uint32_t len)
++{
++	if (len >= 11 && memcmp(buf, "lv:fastboot", 11) == 0) {
++		vm_offset_t imem = ml_io_map(0x146bf000, 0x1000);
++		printf("SWEET USB: command: restart into fastboot\n");
++		if (imem != 0) {
++			*(volatile uint32_t *)(imem + 0x65c) = 0x77665500;
++			__asm__ volatile ("dsb sy" ::: "memory");
++		}
 +		/*
 +		 * lavender: PSCI SYSTEM_RESET is a cold reset that clears IMEM, and the phone booted
 +		 * MIUI. A warm reset keeps restart_reason: PSCI 1.1 SYSTEM_RESET2 (reset type 0 =
@@ -944,9 +741,9 @@ index f29a6ba..e4846ef 100644
 +				delay(2000000);
 +			}
 +		}
- 		ud_psci(0x84000009);
- 		return true;
- 	}
++		ud_psci(0x84000009);
++		return true;
++	}
 +	if (len >= 7 && memcmp(buf, "lv:shot", 7) == 0) {
 +		thread_t th;
 +		uint32_t sc = (len >= 9 && buf[8] >= '1' && buf[8] <= '9') ? (uint32_t)(buf[8] - '0') : 3;
@@ -961,23 +758,121 @@ index f29a6ba..e4846ef 100644
 +		}
 +		return true;
 +	}
-+	if (ud_w_key_command(buf, len) || ud_w_prof_command(buf, len) || ud_w_peek_command(buf, len) ||
-+	    ud_w_put_command(buf, len)) {
++	if (ud_w_key_command(buf, len) || ud_w_put_command(buf, len)) {
 +		return true;
 +	}
-+	if (len >= 6 && memcmp(buf, "lv:pon", 6) == 0) {            /* lavender: PON registers, no change */
-+		lv_pon_dump("now");
++
++
++
++	if (len >= 9 && memcmp(buf, "lv:reboot", 9) == 0) {
++		printf("SWEET USB: command: reboot\n");
++		delay(200000);
++		ud_psci(0x84000009);
 +		return true;
 +	}
-+	if (len >= 7 && memcmp(buf, "lv:psci", 7) == 0) {          /* lavender: what the TZ offers */
-+		printf("SWEET USB: PSCI version 0x%llx, SYSTEM_RESET2 0x%llx, SYSTEM_SUSPEND 0x%llx\n", ud_psci2(0x84000000, 0, 0),
-+		    ud_psci2(0x8400000a, 0xc4000012, 0), ud_psci2(0x8400000a, 0xc400000e, 0));
++	if (len >= 11 && memcmp(buf, "lv:poweroff", 11) == 0) {
++		printf("SWEET USB: command: power off\n");
++		delay(200000);
++		ud_psci(0x84000008);
 +		return true;
 +	}
- 	if (len >= 9 && memcmp(buf, "lv:reboot", 9) == 0) {
- 		printf("SWEET USB: command: reboot\n");
- 		delay(200000);
-@@ -714,6 +1590,10 @@ ud_rx_done(void)
++	return false;
++}
++
++/*
++ * lavender: touches from the PC (tools/usblog.py --cmd "tap X Y" / "swipe X1 Y1 X2 Y2 MS"), in
++ * panel pixels (1080 x 2340), fed to the HID touch service like the Novatek driver's (finger 9,
++ * out of the real fingers' way). A swipe moves in 8 ms steps from a thread of its own.
++ */
++extern void sweet_hid_touch(int finger, int down, int x, int y);
++
++static struct {
++	int x1, y1, x2, y2, ms;
++	bool busy;
++} ud_gesture;
++
++static int
++ud_num(const char **p)
++{
++	int v = 0, any = 0;
++	while (**p == ' ') {
++		(*p)++;
++	}
++	while (**p >= '0' && **p <= '9') {
++		v = v * 10 + (**p - '0');
++		(*p)++;
++		any = 1;
++	}
++	return any ? v : -1;
++}
++
++static void
++ud_gesture_thread(void *arg __unused, wait_result_t wr __unused)
++{
++	int steps = ud_gesture.ms / 8;
++
++	if (steps < 1) {
++		steps = 1;
++	}
++	sweet_hid_touch(9, 1, ud_gesture.x1, ud_gesture.y1);
++	for (int i = 1; i <= steps; i++) {
++		ud_sleep_ms(8);
++		sweet_hid_touch(9, 1, ud_gesture.x1 + (ud_gesture.x2 - ud_gesture.x1) * i / steps,
++		    ud_gesture.y1 + (ud_gesture.y2 - ud_gesture.y1) * i / steps);
++	}
++	ud_sleep_ms(8);
++	sweet_hid_touch(9, 0, ud_gesture.x2, ud_gesture.y2);
++	ud_gesture.busy = false;
++}
++
++static bool
++ud_w_touch_command(const char *buf, uint32_t len)
++{
++	char line[96];
++	const char *p;
++	int v[5], n = 0;
++	thread_t thread;
++
++	if (len >= sizeof(line)) {
++		return false;
++	}
++	memcpy(line, buf, len);
++	line[len] = 0;
++	if (strncmp(line, "lv:tap ", 7) == 0) {
++		p = line + 7;
++	} else if (strncmp(line, "lv:swipe ", 9) == 0) {
++		p = line + 9;
++	} else {
++		return false;
++	}
++	while (n < 5 && (v[n] = ud_num(&p)) >= 0) {
++		n++;
++	}
++	if (ud_gesture.busy || (line[3] == 't' && n < 2) || (line[3] == 's' && n < 4)) {
++		return true;
++	}
++	if (line[3] == 't') {
++		ud_gesture.x1 = ud_gesture.x2 = v[0];
++		ud_gesture.y1 = ud_gesture.y2 = v[1];
++		ud_gesture.ms = 40;
++	} else {
++		ud_gesture.x1 = v[0];
++		ud_gesture.y1 = v[1];
++		ud_gesture.x2 = v[2];
++		ud_gesture.y2 = v[3];
++		ud_gesture.ms = n >= 5 ? v[4] : 300;
++	}
++	ud_gesture.busy = true;
++	if (kernel_thread_start(ud_gesture_thread, NULL, &thread) == KERN_SUCCESS) {
++		thread_deallocate(thread);
++	} else {
++		ud_gesture.busy = false;
++	}
++	return true;
+ }
+ 
+ static void
+@@ -497,6 +1168,15 @@
  	ud_sync(UD_TRB_RX, 16);
  	uint32_t len = UD_FRAME_MAX - (t[2] & 0xffffff);
  	ud_sync(UD_RX, UD_FRAME_MAX);
@@ -985,10 +880,15 @@ index f29a6ba..e4846ef 100644
 +		ud_rx_arm();
 +		return;
 +	}
- 	if (ud_winusb()) {
- 		if (!ud_w_command((const char *)(ud.dma + UD_RX), len)) {
- 			(void)ud_w_touch_command((const char *)(ud.dma + UD_RX), len);
-@@ -771,7 +1651,10 @@ ud_tx_kick_locked(void)
++	if (ud_winusb()) {
++		if (!ud_w_command((const char *)(ud.dma + UD_RX), len)) {
++			(void)ud_w_touch_command((const char *)(ud.dma + UD_RX), len);
++		}
++	}
+ 	if (ud.ifp != NULL && len >= ETHER_HDR_LEN && len <= ETHER_MAX_LEN) {
+ 		/*
+ 		 * One mbuf with a 2 KiB cluster holds any frame. (mbuf_allocpacket
+@@ -549,7 +1229,10 @@
  		}
  		ud.tx_busy = true;
  		ud.tx_frames++;
@@ -1000,7 +900,17 @@ index f29a6ba..e4846ef 100644
  	}
  }
  
-@@ -897,7 +1780,22 @@ ud_event(uint32_t ev)
+@@ -557,7 +1240,8 @@
+ ud_if_output(ifnet_t ifp, mbuf_t m)
+ {
+ 	lck_mtx_lock(ud.lock);
+-	if (ud.txq_count == UD_TXQ || !ud.configured) {
++	/* lavender: in WinUSB mode bulk IN carries the log and screenshots: no Ethernet frames among them */
++	if (ud.txq_count == UD_TXQ || !ud.configured || ud_winusb()) {
+ 		lck_mtx_unlock(ud.lock);
+ 		mbuf_freem(m);
+ 		ifnet_stat_increment_out(ifp, 0, 0, 1);
+@@ -675,7 +1359,23 @@
  		uint32_t type = (ev >> 8) & 0xf;
  		if (type == 1) {        /* USB reset */
  			dwc_wr(DCFG, dwc_rd(DCFG) & ~(0x7fu << 3));
@@ -1010,6 +920,7 @@ index f29a6ba..e4846ef 100644
 +			    ud.tx_frames, ud.rx_frames);
 +			ud_unconfigure();
 +			ud.reset_at = mach_absolute_time() | 1;
++			ud.reset_rearmed = false;
 +			/*
 +			 * lavender: a reset in the middle of a control transfer left ep0 without its
 +			 * SETUP transfer, and the device answered nothing until a reboot ("USB device
@@ -1024,7 +935,7 @@ index f29a6ba..e4846ef 100644
  		} else if (type == 2) { /* connect done */
  			uint32_t speed = dwc_rd(DSTS) & 7;
  			/* ep0 max packet: 64 at high/full speed (modify action) */
-@@ -907,6 +1805,7 @@ ud_event(uint32_t ev)
+@@ -685,6 +1385,7 @@
  			    (1u << 8) | (1u << 10) | (1u << 25), 0);
  			printf("SWEET USB: connected, speed %u\n", speed);
  		} else if (type == 0) {
@@ -1032,7 +943,7 @@ index f29a6ba..e4846ef 100644
  			printf("SWEET USB: disconnect\n");
  		}
  		return;
-@@ -915,7 +1814,11 @@ ud_event(uint32_t ev)
+@@ -693,7 +1394,11 @@
  	unsigned type = (ev >> 6) & 0xf;
  	unsigned status = (ev >> 12) & 0xf;
  
@@ -1044,7 +955,7 @@ index f29a6ba..e4846ef 100644
  		ud_rx_done();
  		return;
  	}
-@@ -961,6 +1864,51 @@ ud_event(uint32_t ev)
+@@ -739,6 +1444,70 @@
  	}
  }
  
@@ -1057,13 +968,32 @@ index f29a6ba..e4846ef 100644
 +static void
 +ud_watchdog(void)
 +{
-+	uint64_t now = mach_absolute_time(), s10, s2;
-+	bool tx_stuck, reset_dead;
++	uint64_t now = mach_absolute_time(), s10, s2, s03;
 +
 +	nanoseconds_to_absolutetime(10 * NSEC_PER_SEC, &s10);
-+	nanoseconds_to_absolutetime(300 * NSEC_PER_MSEC, &s2);     /* (2 s: Windows said "not recognized" first) */
-+	tx_stuck = ud_winusb() && ud.configured && ud.tx_busy && now - ud.tx_since > s10;
-+	reset_dead = ud.reset_at != 0 && now - ud.reset_at > s2;
++	nanoseconds_to_absolutetime(2 * NSEC_PER_SEC, &s2);
++	nanoseconds_to_absolutetime(300 * NSEC_PER_MSEC, &s03);
++	/*
++	 * lavender: a bus reset with no SETUP after it: first, at 0.3 s, ep0 alone is set up again
++	 * (EndTransfer on both directions, SETUP armed anew) - the PC's port reset then ends in a
++	 * normal enumeration, which Windows does without a disconnect (no sound, no "not
++	 * recognized"). Only if that brings nothing in 2 s is the whole controller restarted, which
++	 * the PC sees as the device unplugged and plugged in.
++	 */
++	if (ud.reset_at != 0 && !ud.reset_rearmed && now - ud.reset_at > s03) {
++		ud.reset_rearmed = true;
++		printf("SWEET USB: no SETUP 0.3 s after reset: ep0 armed again (state %u, DSTS 0x%08x, DCFG 0x%08x)\n",
++		    ud.state, dwc_rd(DSTS), dwc_rd(DCFG));
++		ud_epcmd(0, 8 | (1u << 11), 0, 0, 0);
++		ud_epcmd(1, 8 | (1u << 11), 0, 0, 0);
++		delay(100);
++		ud_epcmd(0, DEPCMD_SETEPCONFIG, (0u << 1) | (64u << 3) | (2u << 30), (1u << 8) | (1u << 10) | (0u << 25), 0);
++		ud_epcmd(1, DEPCMD_SETEPCONFIG, (0u << 1) | (64u << 3) | (2u << 30), (1u << 8) | (1u << 10) | (1u << 25), 0);
++		ud_start_setup();
++		return;
++	}
++	bool tx_stuck = ud_winusb() && ud.configured && ud.tx_busy && now - ud.tx_since > s10;
++	bool reset_dead = ud.reset_at != 0 && now - ud.reset_at > s2;
 +	if (!tx_stuck && !reset_dead) {
 +		return;
 +	}
@@ -1071,7 +1001,7 @@ index f29a6ba..e4846ef 100644
 +	volatile uint32_t *tt = (volatile uint32_t *)(ud.dma + UD_TRB_TX);
 +	volatile uint32_t *t0 = (volatile uint32_t *)(ud.dma + UD_TRB_OUT);
 +	printf("SWEET USB: BLACKBOX %s: restart %u, ep0 state %u, tx_busy %d rx_active %d, tx %llu rx %llu, "
-+	    "events %u evt_pos 0x%x GEVNTCOUNT %u\n", tx_stuck ? "TX stuck 10 s" : "no SETUP 0.3 s after reset",
++	    "events %u evt_pos 0x%x GEVNTCOUNT %u\n", tx_stuck ? "TX stuck 10 s" : "no SETUP 2 s after reset",
 +	    ud.restarts, ud.state, ud.tx_busy, ud.rx_active, ud.tx_frames, ud.rx_frames, ud.events, ud.evt_pos,
 +	    dwc_rd(GEVNTCOUNT) & 0xffff);
 +	printf("SWEET USB: BLACKBOX DSTS 0x%08x DCTL 0x%08x DCFG 0x%08x GSTS 0x%08x GCTL 0x%08x GUSB2PHYCFG 0x%08x "
@@ -1096,7 +1026,7 @@ index f29a6ba..e4846ef 100644
  static void
  ud_thread(void *arg __unused, wait_result_t wr __unused)
  {
-@@ -972,13 +1920,19 @@ ud_thread(void *arg __unused, wait_result_t wr __unused)
+@@ -750,13 +1519,19 @@
  			for (uint32_t done = 0; done < count; done += 4) {
  				uint32_t ev = *(volatile uint32_t *)(ud.dma + UD_EVT + ud.evt_pos);
  				ud.evt_pos = (ud.evt_pos + 4) % UD_EVT_SIZE;
@@ -1117,21 +1047,51 @@ index f29a6ba..e4846ef 100644
  		if ((++ticks % 30000) == 0) {
  			printf("SWEET USB: ue0 rx %llu tx %llu frames\n", ud.rx_frames, ud.tx_frames);
  		}
-@@ -1013,6 +1967,10 @@ ud_log_thread(void *arg __unused, wait_result_t wr __unused)
- 				ud_sleep_ms(50);
- 				continue;
- 			}
+@@ -781,8 +1556,33 @@
+ 	socket_t so = NULL;
+ 	struct sockaddr_in to;
+ 	uint64_t pos = sweet_log_position();
++	uint32_t pending = 0;
+ 
+ 	pos = pos > 65536 ? pos - 65536 : 0;
++	if (ud_winusb()) {
++		/* lavender: the console log straight onto bulk IN 0x81 (tools/usblog.py reads it) */
++		for (;;) {
++			if (!ud.configured) {
++				ud_sleep_ms(50);
++				continue;
++			}
 +			if (ud_shot_active) {
 +				ud_sleep_ms(5);         /* lavender: a screenshot owns bulk IN */
 +				continue;
 +			}
- 			if (pending == 0) {
- 				pending = sweet_log_copy(&pos, chunk, sizeof(chunk) - 1);
- 				if (pending != 0 && (pending % 512) == 0) {
-@@ -1077,8 +2035,26 @@ sweet_usb_gadget_start(vm_offset_t dwc)
- 	} else {
- 		ud_if_create();
++			if (pending == 0) {
++				pending = sweet_log_copy(&pos, chunk, sizeof(chunk) - 1);
++				if (pending != 0 && (pending % 512) == 0) {
++					chunk[pending++] = 0;   /* (no transfer of a multiple of 512: the host would wait for more) */
++				}
++			}
++			if (pending != 0 && ud_w_send(chunk, pending)) {
++				pending = 0;
++				continue;
++			}
++			ud_sleep_ms(pending ? 2 : 20);
++		}
++	}
+ 	bzero(&to, sizeof(to));
+ 	to.sin_len = sizeof(to);
+ 	to.sin_family = AF_INET;
+@@ -828,9 +1628,32 @@
+ 		return;
  	}
+ 	ud.dma_pa = ptoa_64(pn);
+-	ud_if_create();
++	if (ud_winusb()) {
++		lck_grp_t *grp = lck_grp_alloc_init("sweet_usb", LCK_GRP_ATTR_NULL);
++		ud.lock = lck_mtx_alloc_init(grp, LCK_ATTR_NULL);
++	} else {
++		ud_if_create();
++	}
 +	if (!ud_hw_init()) {
 +		return;
 +	}
@@ -1156,7 +1116,7 @@ index f29a6ba..e4846ef 100644
  	dwc_wr(DCTL, DCTL_CSFTRST);
  	int i;
  	for (i = 0; i < 500 && (dwc_rd(DCTL) & DCTL_CSFTRST); i++) {
-@@ -1087,7 +2063,7 @@ sweet_usb_gadget_start(vm_offset_t dwc)
+@@ -839,7 +1662,7 @@
  	printf("SWEET USB: soft reset %s after %d ms, GCTL 0x%08x DCFG 0x%08x\n",
  	    (dwc_rd(DCTL) & DCTL_CSFTRST) ? "STUCK" : "done", i, dwc_rd(GCTL), dwc_rd(DCFG));
  	if (dwc_rd(DCTL) & DCTL_CSFTRST) {
@@ -1165,7 +1125,7 @@ index f29a6ba..e4846ef 100644
  	}
  
  	dwc_wr(GEVNTADRLO, (uint32_t)(ud.dma_pa + UD_EVT));
-@@ -1109,7 +2085,7 @@ sweet_usb_gadget_start(vm_offset_t dwc)
+@@ -861,7 +1684,7 @@
  	    ud_epcmd(1, DEPCMD_SETEPCONFIG, (0u << 1) | (512u << 3), (1u << 8) | (1u << 10) | (1u << 25), 0) ||
  	    ud_epcmd(1, DEPCMD_SETTRANSFRESOURCE, 1, 0, 0)) {
  		printf("SWEET USB: endpoint 0 setup failed\n");
@@ -1174,7 +1134,7 @@ index f29a6ba..e4846ef 100644
  	}
  	dwc_wr(DALEPENA, 0x3);
  	ud_start_setup();
-@@ -1131,13 +2107,6 @@ sweet_usb_gadget_start(vm_offset_t dwc)
+@@ -883,13 +1706,6 @@
  		delay(1000);
  	}
  	printf("SWEET USB: running (DSTS 0x%08x after %d ms), DMA at 0x%llx\n", dwc_rd(DSTS), i, ud.dma_pa);
@@ -1183,71 +1143,49 @@ index f29a6ba..e4846ef 100644
 -	}
 -	int livelog = 1;
 -	PE_parse_boot_argn("sweetusblog", &livelog, sizeof(livelog));
--	if (livelog && (ud.ifp != NULL || ud_winusb()) && kernel_thread_start(ud_log_thread, NULL, &thread) == KERN_SUCCESS) {
+-	if (livelog && ud.ifp != NULL && kernel_thread_start(ud_log_thread, NULL, &thread) == KERN_SUCCESS) {
 -		thread_deallocate(thread);
 -	}
 +	return true;
  }
  #endif /* ARM64_BOARD_CONFIG_SWEET */
 diff --git a/iokit/Kernel/arm/SweetFramebuffer.cpp b/iokit/Kernel/arm/SweetFramebuffer.cpp
-index 2315900..ab7b0e0 100644
---- a/iokit/Kernel/arm/SweetFramebuffer.cpp
-+++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
-@@ -258,6 +258,8 @@ public:
-  * the brightness slider is dead. It then sets "brightness-nits" here
-  * (SetBLDriverNitsValue) and IOMFBBrightnessLevel on the framebuffer.
-  */
-+static AppleCLCD *gSweetShot;         /* lavender: the panel, for the USB screenshot */
-+
- class AppleARMBacklight : public IOService {
- 	OSDeclareDefaultStructors(AppleARMBacklight);
- public:
-@@ -449,6 +451,7 @@ AppleCLCD::start(IOService *provider)
- 		fBootStride = fVig0[0x24 / 4];
- 		fScanPhys = fBootSrc;
- 		fScanStride = fBootStride;
-+		gSweetShot = this;
- 		IOLog("SWEET FB: MDP VIG0 src %#x stride %u (boot), direct scanout ready\n",
- 		    fBootSrc, fBootStride);
- 		sweet_scanout_set_geometry(fWidth, fHeight, fLogicalW, fLogicalH);
-@@ -1140,6 +1143,40 @@ AppleCLCD::scanFrom(uint64_t pa, uint32_t stride)
- 	fScanStride = stride;
- }
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp	2026-11-23 13:33:32.340100522 +0000
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp	2026-11-23 13:33:32.420900147 +0000
+@@ -304,6 +304,28 @@
+ 
+ OSDefineMetaClassAndStructors(IOMobileFramebufferUserClient, IOUserClient);
  
 +/*
-+ * lavender: the frame the panel shows now, for the USB screenshot (sweet_usb.c "lv:shot"):
-+ * GPU pool surfaces through the GPU driver's write-combined view, our flip buffers and the
-+ * boot framebuffer through their kernel mappings. 32-bit BGRA.
++ * lavender-minimal: the frame the panel shows, for the USB screenshot (sweet_usb.c "lv:shot"):
++ * this kernel copies every frame into the boot framebuffer the panel keeps scanning (no MDP
++ * flip), so that is the picture. 32-bit BGRA.
 + */
++static AppleCLCD *gSweetShot;
 +extern "C" bool sweet_fb_shot_source(const uint8_t **va, uint32_t *stride, uint32_t *w, uint32_t *h);
 +extern "C" bool
 +sweet_fb_shot_source(const uint8_t **va, uint32_t *stride, uint32_t *w, uint32_t *h)
 +{
 +	AppleCLCD *fb = gSweetShot;
-+	const uint8_t *p = NULL;
 +
-+	if (fb == NULL || fb->fScanPhys == 0) {
++	if (fb == NULL || fb->fPixels == 0) {
 +		return false;
 +	}
-+	p = (const uint8_t *)topaz_gpu_pool_va(fb->fScanPhys);
-+	for (int i = 0; p == NULL && i < 2; i++) {
-+		if (fb->fFlip[i] != NULL && fb->fScanPhys == fb->fFlipPhys[i]) {
-+			p = (const uint8_t *)fb->fFlip[i]->getBytesNoCopy();
-+		}
-+	}
-+	if (p == NULL && fb->fScanPhys == fb->fBootSrc && fb->fPixels != 0) {
-+		p = (const uint8_t *)fb->fPixels;
-+	}
-+	if (p == NULL) {
-+		return false;
-+	}
-+	*va = p;
-+	*stride = fb->fScanStride;
++	*va = (const uint8_t *)fb->fPixels;
++	*stride = fb->fRowBytes;
 +	*w = fb->fWidth;
 +	*h = fb->fHeight;
 +	return true;
 +}
 +
- /*
-  * DCS long write through the DSI command DMA path (topaz-woa: the TPG FIFO
-  * path is a no-op on this DSI 2.4.1). The packet lives in a contiguous
+ bool
+ AppleCLCD::start(IOService *provider)
+ {
+@@ -340,6 +362,7 @@
+ 	fClients = OSArray::withCapacity(4);
+ 	fSurface = sweet_surface_create_physical(fPhys, fWidth, fHeight, fRowBytes, SWEET_FB_FORMAT_BGRA);
+ 	fPixels = fSurface != NULL ? fSurface->kernelAddress() : 0;
++	gSweetShot = this;
+ 	fWorkLoop = IOWorkLoop::workLoop();
+ 	if (fLock == NULL || fClients == NULL || fPixels == 0 || fWorkLoop == NULL) {
+ 		IOLog("SWEET FB: setup failed\n");
