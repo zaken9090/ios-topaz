@@ -54,7 +54,7 @@
  }
 --- a/src/gallium/frontends/osmesa/osmesa.c
 +++ b/src/gallium/frontends/osmesa/osmesa.c
-@@ -1027,3 +1027,14 @@
+@@ -1027,3 +1027,38 @@
        debug_warning("Calling OSMesaPostprocess() after OSMesaMakeCurrent()\n");
     }
  }
@@ -69,6 +69,53 @@
 +{
 +   _mesa_TextureBarrierNV();
 +}
++
++
++#include "main/context.h"
++#include "state_tracker/st_cb_flush.h"
++
++GLAPI void GLAPIENTRY OSMesaFlushSync(void);
++
++/*
++ * lavender: glFlush as it was before FD_TC made it asynchronous - everything handed to the driver
++ * (the threaded context's queue run to its end: the kernel has the submissions) without waiting
++ * for the GPU: the end of a frame, before the display is told of it.
++ */
++GLAPI void GLAPIENTRY
++OSMesaFlushSync(void)
++{
++   OSMesaContext osmesa = OSMesaGetCurrentContext();
++
++   if (osmesa != NULL && osmesa->st != NULL) {
++      struct gl_context *ctx = osmesa->st->ctx;
++
++      FLUSH_VERTICES(ctx, 0, 0);
++      st_glFlush(ctx, 0);
++   }
++}
+--- a/src/mesa/main/context.c
++++ b/src/mesa/main/context.c
+@@ -1612,13 +1612,19 @@
+ /** \name Miscellaneous functions                                     */
+ /**********************************************************************/
+ /*@{*/
++#include <stdlib.h>
++
+ /**
+  * Flush commands.
+  */
+ void
+ _mesa_flush(struct gl_context *ctx)
+ {
+-   bool async = !ctx->Shared->HasExternallySharedImages;
++   static int lv_tc = -1;
++
++   if (lv_tc < 0)
++      lv_tc = getenv("FD_TC") != NULL && getenv("FD_TC")[0] == '1';
++   bool async = !ctx->Shared->HasExternallySharedImages || lv_tc;
+    FLUSH_VERTICES(ctx, 0, 0);
+ 
+    st_glFlush(ctx, async ? PIPE_FLUSH_ASYNC : 0);
 --- a/src/gallium/drivers/freedreno/freedreno_context.c
 +++ b/src/gallium/drivers/freedreno/freedreno_context.c
 @@ -33,6 +33,12 @@

@@ -1833,6 +1833,29 @@ prof_main(void *arg)
 }
 
 static void frame_functions(struct eagl *e);
+/*
+ * lavender: with Mesa's threaded context glFlush only queues (the patched _mesa_flush); what the
+ * display is about to take must be with the kernel: OSMesaFlushSync() runs the queue to its end
+ * (no wait for the GPU). Without it: glFlush.
+ */
+static int
+flush_sync(void)
+{
+	static void (*sync)(void);
+	static int looked;
+
+	if (!looked) {
+		looked = 1;
+		sync = (void (*)(void))dlsym(RTLD_DEFAULT, "OSMesaFlushSync");
+		say("redwood-gl: a frame's end through %s\n", sync ? "OSMesaFlushSync" : "glFlush");
+	}
+	if (sync != NULL) {
+		sync();
+		return 1;
+	}
+	glFlush();
+	return 0;
+}
 static void
 frame_end(struct eagl *e, bool finished)
 {
@@ -1855,7 +1878,7 @@ frame_end(struct eagl *e, bool finished)
 			preserve_from = e->images[i].texture;   /* (the next frame starts from this one: preserve_before()) */
 			target_to_surface(e, &e->images[i]);    /* (the GPU's copy: before what follows sends it out) */
 			in_place++;
-			glFlush();                              /* (also after a glFinish: the copy is new since) */
+			flush_sync();                           /* (also after a glFinish: the copy is new since) */
 			fl_mirror++;
 		}
 		if (e->images[i].target && e->images[i].drawn && e->images[i].shared) {
@@ -1864,6 +1887,8 @@ frame_end(struct eagl *e, bool finished)
 	}
 	if (in_place != 0 && !finished && wait_for_frames) {
 		glFinish();             /* the display's driver reads the surface as soon as it is told of it */
+	} else if (in_place != 0 && !finished && sync_frames && flush_sync()) {
+		/* (all with the kernel now) */
 	} else if (in_place != 0 && !finished && sync_frames) {
 		/*
 		 * The display's driver waits for the last submission that named the surface -- and Mesa's
